@@ -22,6 +22,10 @@ abstract class AbstractHttpProviderAdapter implements ProviderAdapter {
         this.mapper = mapper;
     }
 
+    protected AbstractHttpProviderAdapter() {
+        this.mapper = null;
+    }
+
     @Override
     public CompletableFuture<ProviderResponse> infer(ProviderRequest request) {
         ModelProfile profile = request.profile();

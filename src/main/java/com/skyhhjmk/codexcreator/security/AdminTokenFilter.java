@@ -11,12 +11,13 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Optional;
 
 @Provider
 @Priority(Priorities.AUTHENTICATION)
 public class AdminTokenFilter implements ContainerRequestFilter {
     @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
-    String adminToken;
+    Optional<String> adminToken;
 
     @Override
     public void filter(ContainerRequestContext context) throws IOException {
@@ -27,7 +28,7 @@ public class AdminTokenFilter implements ContainerRequestFilter {
         String authorization = context.getHeaderString("Authorization");
         String supplied = authorization != null && authorization.startsWith("Bearer ")
                 ? authorization.substring("Bearer ".length()).trim() : "";
-        if (adminToken == null || adminToken.isBlank() || !same(adminToken, supplied)) {
+        if (adminToken.isEmpty() || adminToken.get().isBlank() || !same(adminToken.get(), supplied)) {
             context.abortWith(Response.status(Response.Status.UNAUTHORIZED)
                     .header("WWW-Authenticate", "Bearer")
                     .entity(java.util.Map.of("error", "admin authentication required"))

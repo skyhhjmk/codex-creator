@@ -10,6 +10,10 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class GeminiProviderAdapter extends AbstractHttpProviderAdapter {
+    protected GeminiProviderAdapter() {
+        super();
+    }
+
     @Inject
     public GeminiProviderAdapter(ObjectMapper mapper) {
         super(mapper);

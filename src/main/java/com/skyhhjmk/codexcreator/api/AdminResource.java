@@ -15,7 +15,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 import java.time.OffsetDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.CompletionStage;
 
 @Path("/api/admin")
 @Produces(MediaType.APPLICATION_JSON)
@@ -29,17 +29,17 @@ public class AdminResource {
     CodexAppServerSupervisor supervisor;
 
     @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
-    String adminToken;
+    Optional<String> adminToken;
 
     @ConfigProperty(name = "codex.creator.mcp-bearer-token", defaultValue = "")
-    String mcpToken;
+    Optional<String> mcpToken;
 
     @GET
     @Path("/auth/status")
     @Operation(summary = "Report whether the internal admin credential is configured")
     public Map<String, Object> authStatus() {
-        return Map.of("service", "codex-creator", "adminTokenConfigured", adminToken != null && !adminToken.isBlank(),
-                "mcpTokenConfigured", mcpToken != null && !mcpToken.isBlank());
+        return Map.of("service", "codex-creator", "adminTokenConfigured", adminToken.isPresent() && !adminToken.get().isBlank(),
+                "mcpTokenConfigured", mcpToken.isPresent() && !mcpToken.get().isBlank());
     }
 
     @GET
@@ -104,8 +104,11 @@ public class AdminResource {
 
     @POST
     @Path("/models/discover")
-    public Response discoverModels() {
-        return Response.ok(supervisor.listModels()).build();
+    public CompletionStage<Response> discoverModels() {
+        return supervisor.listModels()
+                .thenApply(models -> Response.ok(models).build())
+                .exceptionally(error -> Response.status(Response.Status.SERVICE_UNAVAILABLE)
+                        .entity(Map.of("error", "Codex app-server model discovery is unavailable")).build());
     }
 
     @GET

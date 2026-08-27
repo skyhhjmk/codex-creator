@@ -10,6 +10,10 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class OllamaProviderAdapter extends AbstractHttpProviderAdapter {
+    protected OllamaProviderAdapter() {
+        super();
+    }
+
     @Inject
     public OllamaProviderAdapter(ObjectMapper mapper) {
         super(mapper);

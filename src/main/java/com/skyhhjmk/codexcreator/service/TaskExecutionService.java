@@ -9,14 +9,13 @@ import com.skyhhjmk.codexcreator.provider.ProviderRequest;
 import com.skyhhjmk.codexcreator.provider.ProviderResponse;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceRequest;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceResponse;
-import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
-import jakarta.persistence.NoResultException;
 import jakarta.transaction.Transactional;
 
 import java.time.OffsetDateTime;
-import java.util.LinkedHashMap;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -34,6 +33,12 @@ public class TaskExecutionService {
     @Inject
     RuntimeInferenceConfig runtimeConfig;
 
+    @Inject
+    Instance<TaskExecutionService> self;
+
+    @Inject
+    TaskCacheService taskCache;
+
     public CompletableFuture<RuntimeInferenceResponse> infer(RuntimeInferenceRequest request) {
         if (request == null || request.operation() == null || request.operation().isBlank()
                 || request.profileId() == null || request.profileId().isBlank()
@@ -42,16 +47,18 @@ public class TaskExecutionService {
             return CompletableFuture.failedFuture(new IllegalArgumentException(
                     "operation, profileId, input, idempotencyKey and traceId are required"));
         }
-        AutomationTask existing = findByIdempotency(request.idempotencyKey());
-        if (existing != null) return CompletableFuture.completedFuture(toResponse(existing));
+        String cacheKey = CacheKey.forTask(mapper, request.operation(), request.input(),
+                request.profileId(), request.promptVersion());
+        AutomationTask existing = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
+        if (existing != null) return CompletableFuture.completedFuture(self.get().snapshot(existing.id));
 
         TaskContext context;
         try {
-            context = createTask(request);
+            context = self.get().createTask(request);
         } catch (RuntimeException exception) {
             // A concurrent request may have won the unique idempotency key race.
-            AutomationTask winner = findByIdempotency(request.idempotencyKey());
-            if (winner != null) return CompletableFuture.completedFuture(toResponse(winner));
+            AutomationTask winner = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
+            if (winner != null) return CompletableFuture.completedFuture(self.get().snapshot(winner.id));
             return CompletableFuture.failedFuture(exception);
         }
 
@@ -59,18 +66,25 @@ public class TaskExecutionService {
         try {
             adapter = providerRegistry.resolve(context.profile());
         } catch (RuntimeException exception) {
-            fail(context.taskId(), "PROVIDER_UNAVAILABLE", exception.getMessage());
-            return CompletableFuture.completedFuture(toResponse(findById(context.taskId())));
+            self.get().fail(context.taskId(), "PROVIDER_UNAVAILABLE", exception.getMessage());
+            return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
         }
-        markStarted(context.taskId(), adapter.getClass().getSimpleName());
-        return adapter.infer(new ProviderRequest(request.operation(), context.profile(), request.input(), request.traceId()))
+        self.get().markStarted(context.taskId(), adapter.getClass().getSimpleName());
+        var cached = taskCache.get(cacheKey);
+        if (cached.isPresent()) {
+            self.get().complete(context.taskId(), new ProviderResponse(cached.get(), ProviderResponse.Usage.empty(),
+                    Map.of("cache", "redis", "cacheKey", cacheKey), null, null, null));
+            return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
+        }
+        return adapter.infer(new ProviderRequest(request.operation(), context.profile(), request.input(), request.traceId(), context.taskId()))
                 .handle((response, error) -> {
                     if (error != null) {
-                        fail(context.taskId(), "PROVIDER_ERROR", rootMessage(error));
+                        self.get().fail(context.taskId(), "PROVIDER_ERROR", rootMessage(error));
                     } else {
-                        complete(context.taskId(), response);
+                        taskCache.put(cacheKey, response.output(), Duration.ofMinutes(30));
+                        self.get().complete(context.taskId(), response);
                     }
-                    return toResponse(findById(context.taskId()));
+                    return self.get().snapshot(context.taskId());
                 });
     }
 
@@ -149,10 +163,16 @@ public class TaskExecutionService {
 
     @Transactional
     public RuntimeInferenceResponse get(Long id) {
+        return snapshot(id);
+    }
+
+    @Transactional
+    public RuntimeInferenceResponse snapshot(Long id) {
         return toResponse(findById(id));
     }
 
-    private AutomationTask findByIdempotency(String key) {
+    @Transactional
+    public AutomationTask findByIdempotencyInTransaction(String key) {
         return AutomationTask.find("idempotencyKey", key).firstResult();
     }
 

@@ -5,6 +5,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -12,14 +13,14 @@ public class InternalRequestVerifier {
     private final Map<String, Long> nonces = new ConcurrentHashMap<>();
 
     @ConfigProperty(name = "codex.creator.internal-shared-secret", defaultValue = "")
-    String sharedSecret;
+    Optional<String> sharedSecret;
 
     @ConfigProperty(name = "codex.creator.internal.clock-skew-seconds", defaultValue = "300")
     long clockSkewSeconds;
 
     public boolean verify(String clientId, String timestamp, String nonce,
                           String bodyDigest, String signature, String body) {
-        if (isBlank(sharedSecret) || isBlank(clientId) || isBlank(timestamp)
+        if (sharedSecret.isEmpty() || isBlank(sharedSecret.get()) || isBlank(clientId) || isBlank(timestamp)
                 || isBlank(nonce) || isBlank(bodyDigest) || isBlank(signature)) {
             return false;
         }
@@ -36,7 +37,7 @@ public class InternalRequestVerifier {
         if (!HmacSigner.constantTimeEquals(bodyDigest, HmacSigner.bodyDigest(body))) {
             return false;
         }
-        String expected = HmacSigner.sign(sharedSecret, clientId, timestamp, nonce, bodyDigest);
+        String expected = HmacSigner.sign(sharedSecret.get(), clientId, timestamp, nonce, bodyDigest);
         if (!HmacSigner.constantTimeEquals(expected, signature)) {
             return false;
         }

@@ -17,7 +17,7 @@ public class AutomationTask extends PanacheEntityBase {
     @Column(nullable = false, length = 80)
     public String operation;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "profile_id")
     public ModelProfile profile;
 

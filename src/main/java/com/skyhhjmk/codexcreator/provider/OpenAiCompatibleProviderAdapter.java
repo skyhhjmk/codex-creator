@@ -10,6 +10,10 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class OpenAiCompatibleProviderAdapter extends AbstractHttpProviderAdapter {
+    protected OpenAiCompatibleProviderAdapter() {
+        super();
+    }
+
     @Inject
     public OpenAiCompatibleProviderAdapter(ObjectMapper mapper) {
         super(mapper);

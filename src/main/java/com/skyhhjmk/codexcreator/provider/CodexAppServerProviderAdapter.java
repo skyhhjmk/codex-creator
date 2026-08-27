@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.skyhhjmk.codexcreator.domain.ModelProfile;
 import com.skyhhjmk.codexcreator.runtime.CodexAppServerSupervisor;
+import com.skyhhjmk.codexcreator.service.CodexRuntimePersistence;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -22,6 +23,9 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
 
     @Inject
     ObjectMapper mapper;
+
+    @Inject
+    CodexRuntimePersistence persistence;
 
     @Override
     public boolean supports(String providerType) {
@@ -41,6 +45,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                     if (threadId.isBlank()) {
                         return CompletableFuture.failedFuture(new IllegalStateException("app-server did not return thread id"));
                     }
+                    Long threadDbId = persistence.threadStarted(request.taskId(), profile, threadId);
                     ObjectNode turnParams = mapper.createObjectNode();
                     turnParams.put("threadId", threadId);
                     ArrayNode input = turnParams.putArray("input");
@@ -50,8 +55,18 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                     return supervisor.request("turn/start", turnParams)
                             .thenCompose(turnResult -> {
                                 String turnId = turnResult.path("turn").path("id").asText("");
+                                if (turnId.isBlank()) {
+                                    return CompletableFuture.failedFuture(new IllegalStateException("app-server did not return turn id"));
+                                }
+                                persistence.turnStarted(request.taskId(), threadDbId, turnId, request.input());
                                 return supervisor.awaitTurnCompletion(threadId, turnId)
-                                        .thenApply(completed -> response(completed, threadId, turnId));
+                                        .thenApply(completed -> {
+                                            persistence.turnCompleted(turnId, completed);
+                                            return response(completed, threadId, turnId);
+                                        })
+                                        .whenComplete((ignored, error) -> {
+                                            if (error != null) persistence.turnFailed(turnId, error);
+                                        });
                             });
                 });
     }

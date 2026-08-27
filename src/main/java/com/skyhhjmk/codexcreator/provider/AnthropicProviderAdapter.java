@@ -10,6 +10,10 @@ import jakarta.inject.Inject;
 
 @ApplicationScoped
 public class AnthropicProviderAdapter extends AbstractHttpProviderAdapter {
+    protected AnthropicProviderAdapter() {
+        super();
+    }
+
     @Inject
     public AnthropicProviderAdapter(ObjectMapper mapper) {
         super(mapper);

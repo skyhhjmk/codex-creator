@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Path("/mcp")
 @Produces(MediaType.APPLICATION_JSON)
@@ -33,7 +34,7 @@ public class McpResource {
     ObjectMapper mapper;
 
     @ConfigProperty(name = "codex.creator.mcp-bearer-token", defaultValue = "")
-    String bearerToken;
+    Optional<String> bearerToken;
 
     @ConfigProperty(name = "codex.creator.mcp.write-approval-required", defaultValue = "true")
     boolean writeApprovalRequired;
@@ -114,9 +115,9 @@ public class McpResource {
     }
 
     private boolean authorized(String authorization) {
-        if (bearerToken == null || bearerToken.isBlank() || authorization == null
+        if (bearerToken.isEmpty() || bearerToken.get().isBlank() || authorization == null
                 || !authorization.startsWith("Bearer ")) return false;
-        byte[] expected = bearerToken.getBytes(StandardCharsets.UTF_8);
+        byte[] expected = bearerToken.get().getBytes(StandardCharsets.UTF_8);
         byte[] actual = authorization.substring("Bearer ".length()).trim().getBytes(StandardCharsets.UTF_8);
         return MessageDigest.isEqual(expected, actual);
     }
