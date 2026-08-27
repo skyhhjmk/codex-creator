@@ -14,7 +14,7 @@ public class ModelProfile extends PanacheEntityBase {
     @Column(name = "profile_id", length = 128)
     public String profileId;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "provider_config_id")
     public ProviderConfig providerConfig;
 

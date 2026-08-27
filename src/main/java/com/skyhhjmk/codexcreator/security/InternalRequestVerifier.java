@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class InternalRequestVerifier {
     private final Map<String, Long> nonces = new ConcurrentHashMap<>();
 
-    @ConfigProperty(name = "codex.creator.internal-shared-secret")
+    @ConfigProperty(name = "codex.creator.internal-shared-secret", defaultValue = "")
     String sharedSecret;
 
     @ConfigProperty(name = "codex.creator.internal.clock-skew-seconds", defaultValue = "300")

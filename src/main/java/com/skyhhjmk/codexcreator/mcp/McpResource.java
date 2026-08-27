@@ -47,8 +47,7 @@ public class McpResource {
             String method = request.path("method").asText("");
             JsonNode id = request.get("id");
             return switch (method) {
-                case "initialize" -> ok(id, mapper.createObjectNode()
-                        .put("protocolVersion", "2025-06-18"));
+                case "initialize" -> ok(id, initializeResult());
                 case "notifications/initialized" -> Response.noContent().build();
                 case "tools/list" -> ok(id, toolsList());
                 case "tools/call" -> call(id, request.path("params"));
@@ -87,6 +86,14 @@ public class McpResource {
             tools.addObject().put("name", tool.name()).put("description", tool.description())
                     .putObject("inputSchema").put("type", "object");
         }
+        return result;
+    }
+
+    private ObjectNode initializeResult() {
+        ObjectNode result = mapper.createObjectNode();
+        result.put("protocolVersion", "2025-06-18");
+        result.putObject("capabilities").putObject("tools");
+        result.putObject("serverInfo").put("name", "codex-creator").put("version", "0.1.0");
         return result;
     }
 

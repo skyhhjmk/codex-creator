@@ -28,6 +28,9 @@ public class AdminResource {
     @Inject
     CodexAppServerSupervisor supervisor;
 
+    @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
+    String adminToken;
+
     @ConfigProperty(name = "codex.creator.mcp-bearer-token", defaultValue = "")
     String mcpToken;
 
@@ -35,7 +38,7 @@ public class AdminResource {
     @Path("/auth/status")
     @Operation(summary = "Report whether the internal admin credential is configured")
     public Map<String, Object> authStatus() {
-        return Map.of("service", "codex-creator", "adminTokenConfigured", true,
+        return Map.of("service", "codex-creator", "adminTokenConfigured", adminToken != null && !adminToken.isBlank(),
                 "mcpTokenConfigured", mcpToken != null && !mcpToken.isBlank());
     }
 

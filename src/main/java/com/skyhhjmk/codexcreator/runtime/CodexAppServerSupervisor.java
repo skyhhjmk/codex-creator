@@ -130,7 +130,7 @@ public class CodexAppServerSupervisor {
                     params.path("turn").path("threadId").asText(""));
             String eventTurnId = params.path("turn").path("id").asText(
                     params.path("turnId").asText(""));
-            boolean threadMatches = threadId == null || threadId.isBlank() || threadId.equals(eventThreadId)
+            boolean threadMatches = threadId == null || threadId.isBlank() || eventThreadId.isBlank() || threadId.equals(eventThreadId)
                     || params.path("turn").path("threadId").asText("").equals(threadId);
             boolean turnMatches = turnId == null || turnId.isBlank() || turnId.equals(eventTurnId);
             if (threadMatches && turnMatches) {

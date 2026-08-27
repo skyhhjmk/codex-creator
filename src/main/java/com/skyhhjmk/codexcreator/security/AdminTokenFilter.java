@@ -15,7 +15,7 @@ import java.security.MessageDigest;
 @Provider
 @Priority(Priorities.AUTHENTICATION)
 public class AdminTokenFilter implements ContainerRequestFilter {
-    @ConfigProperty(name = "codex.creator.admin-token")
+    @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
     String adminToken;
 
     @Override
