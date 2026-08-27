@@ -1,0 +1,10 @@
+target/
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+*.iml
+/.codex/
+data/
+logs/
