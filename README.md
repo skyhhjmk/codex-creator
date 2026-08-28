@@ -22,6 +22,13 @@ cp .env.example .env
 docker compose --env-file .env up --build
 ```
 
+The `master`/`main` GitHub Actions workflow builds the Quarkus native
+executable and publishes `ghcr.io/skyhhjmk/codex-creator`. Release builds are
+published as `<version>-native` and `sha-<commit>-native`; `latest-native` is
+the deployment tag, while `latest` remains a compatibility alias. Pulling the
+private package requires a GHCR token with `read:packages` on the deployment
+host.
+
 The default application does not start Codex until `CODEX_APP_SERVER_ENABLED=true` is explicitly set. The installed `codex` binary, authentication, model availability, account quota, MCP integration, HTTPS, backups, and target ingress remain deployment acceptance items.
 
 ## API outline
