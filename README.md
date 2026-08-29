@@ -13,6 +13,15 @@
 
 The app-server protocol facts follow the [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server). The provider adapter's Responses payload follows the [official Responses API reference](https://developers.openai.com/api/reference/cli/resources/responses/methods/create). MCP configuration and bearer-token behavior follow [official MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
+The published JVM and native images include the pinned Codex CLI release
+`0.150.1`, including the `app-server` runtime resources. Override the
+`CODEX_RELEASE` build argument only as an intentional CLI upgrade. The image
+does not contain credentials. When app-server is enabled, the entrypoint can
+authenticate a runtime-provided `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` via
+stdin; alternatively, provide a trusted Codex auth cache through `CODEX_HOME`.
+When app-server is enabled, startup fails fast if no valid Codex authentication
+is available.
+
 ## Local development
 
 ```bash
@@ -29,7 +38,7 @@ the deployment tag, while `latest` remains a compatibility alias. Pulling the
 private package requires a GHCR token with `read:packages` on the deployment
 host.
 
-The default application does not start Codex until `CODEX_APP_SERVER_ENABLED=true` is explicitly set. The installed `codex` binary, authentication, model availability, account quota, MCP integration, HTTPS, backups, and target ingress remain deployment acceptance items.
+The default application does not start Codex until `CODEX_APP_SERVER_ENABLED=true` is explicitly set. The image contains the `codex` binary, but authentication, model availability, account quota, MCP integration, HTTPS, backups, and target ingress remain deployment acceptance items.
 
 ## API outline
 

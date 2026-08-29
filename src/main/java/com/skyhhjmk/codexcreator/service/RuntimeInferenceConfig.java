@@ -7,4 +7,13 @@ import io.smallrye.config.WithDefault;
 public interface RuntimeInferenceConfig {
     @WithDefault("3")
     int maxAttempts();
+
+    @WithDefault("1000")
+    long retryDelayMillis();
+
+    @WithDefault("300")
+    int lockTtlSeconds();
+
+    @WithDefault("35")
+    int lockWaitSeconds();
 }

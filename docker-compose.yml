@@ -27,7 +27,10 @@ services:
       retries: 10
 
   codex-creator:
-    build: .
+    build:
+      context: .
+      args:
+        CODEX_RELEASE: ${CODEX_RELEASE:-0.150.1}
     image: ${CODEX_CREATOR_IMAGE:-ghcr.io/skyhhjmk/codex-creator:latest}
     restart: unless-stopped
     environment:
@@ -41,6 +44,8 @@ services:
       CODEX_CREATOR_MCP_BEARER_TOKEN: ${CODEX_CREATOR_MCP_BEARER_TOKEN:?CODEX_CREATOR_MCP_BEARER_TOKEN must be set}
       CODEX_APP_SERVER_ENABLED: ${CODEX_APP_SERVER_ENABLED:-false}
       CODEX_COMMAND: ${CODEX_COMMAND:-codex}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
     volumes:
       - codex-creator-data:/data/codex-creator
       - ${CODEX_CREATOR_LOG_DIR:-./logs}:/deployments/logs

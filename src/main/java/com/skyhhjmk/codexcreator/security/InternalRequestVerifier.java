@@ -4,19 +4,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class InternalRequestVerifier {
-    private final Map<String, Long> nonces = new ConcurrentHashMap<>();
-
     @ConfigProperty(name = "codex.creator.internal-shared-secret", defaultValue = "")
     Optional<String> sharedSecret;
 
     @ConfigProperty(name = "codex.creator.internal.clock-skew-seconds", defaultValue = "300")
     long clockSkewSeconds;
+
+    @jakarta.inject.Inject
+    IntegrationNonceStore nonceStore;
 
     public boolean verify(String clientId, String timestamp, String nonce,
                           String bodyDigest, String signature, String body) {
@@ -42,12 +41,13 @@ public class InternalRequestVerifier {
             return false;
         }
         long expiry = now + Math.max(1, clockSkewSeconds);
-        purge(now);
-        return nonces.putIfAbsent(clientId + ":" + nonce, expiry) == null;
-    }
-
-    private void purge(long now) {
-        nonces.entrySet().removeIf(entry -> entry.getValue() < now);
+        try {
+            // The database primary key makes this claim atomic across threads,
+            // processes, replicas, and restarts. Any database failure is fail-closed.
+            return nonceStore.claim(clientId, nonce, expiry);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     private static boolean isBlank(String value) {

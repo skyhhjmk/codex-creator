@@ -3,7 +3,6 @@ package com.skyhhjmk.codexcreator.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.redis.datasource.RedisDataSource;
-import io.quarkus.redis.datasource.keys.KeyCommands;
 import io.quarkus.redis.datasource.value.SetArgs;
 import io.quarkus.redis.datasource.value.ValueCommands;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,6 +16,29 @@ import java.util.Optional;
 @ApplicationScoped
 public class TaskCacheService {
     private static final String PREFIX = "codex-creator:";
+    private static final String RELEASE_LOCK_SCRIPT =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                    + "return redis.call('del', KEYS[1]) else return 0 end";
+
+    public enum LockStatus {
+        ACQUIRED,
+        BUSY,
+        UNAVAILABLE
+    }
+
+    public record LockAttempt(LockStatus status, String token) {
+        public static LockAttempt acquired(String token) {
+            return new LockAttempt(LockStatus.ACQUIRED, token);
+        }
+
+        public static LockAttempt busy() {
+            return new LockAttempt(LockStatus.BUSY, null);
+        }
+
+        public static LockAttempt unavailable() {
+            return new LockAttempt(LockStatus.UNAVAILABLE, null);
+        }
+    }
 
     @Inject
     Instance<RedisDataSource> redisDataSource;
@@ -24,8 +46,8 @@ public class TaskCacheService {
     @Inject
     ObjectMapper mapper;
 
+    private volatile RedisDataSource source;
     private volatile ValueCommands<String, String> values;
-    private volatile KeyCommands<String> keys;
 
     public Optional<JsonNode> get(String cacheKey) {
         if (!connect()) return Optional.empty();
@@ -47,16 +69,16 @@ public class TaskCacheService {
         }
     }
 
-    /** Returns a token when the distributed lock was acquired. */
-    public Optional<String> tryAcquire(String lockKey, Duration ttl) {
-        if (!connect()) return Optional.empty();
+    /** Distinguishes a held lock from an unavailable Redis cache. */
+    public LockAttempt acquire(String lockKey, Duration ttl) {
+        if (!connect()) return LockAttempt.unavailable();
         String token = java.util.UUID.randomUUID().toString();
         try {
             boolean acquired = values.setAndChanged(PREFIX + "lock:" + lockKey, token,
                     new SetArgs().nx().ex(ttl == null ? Duration.ofSeconds(30) : ttl));
-            return acquired ? Optional.of(token) : Optional.empty();
+            return acquired ? LockAttempt.acquired(token) : LockAttempt.busy();
         } catch (Exception ignored) {
-            return Optional.empty();
+            return LockAttempt.unavailable();
         }
     }
 
@@ -65,20 +87,21 @@ public class TaskCacheService {
         if (token == null || !connect()) return;
         try {
             String key = PREFIX + "lock:" + lockKey;
-            if (token.equals(values.get(key))) keys.del(key);
+            // Compare-and-delete must be one Redis operation; a separate GET
+            // followed by DEL could remove a newer owner's lock.
+            source.execute("EVAL", RELEASE_LOCK_SCRIPT, "1", key, token);
         } catch (Exception ignored) {
             // Lock expiry is the safety net when Redis is unavailable.
         }
     }
 
     private boolean connect() {
-        if (values != null && keys != null) return true;
+        if (source != null && values != null) return true;
         synchronized (this) {
-            if (values != null && keys != null) return true;
+            if (source != null && values != null) return true;
             try {
-                RedisDataSource source = redisDataSource.get();
+                source = redisDataSource.get();
                 values = source.value(String.class);
-                keys = source.key(String.class);
                 return true;
             } catch (Exception ignored) {
                 return false;

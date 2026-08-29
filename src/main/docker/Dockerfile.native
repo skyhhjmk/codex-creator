@@ -1,20 +1,48 @@
-####
+ARG CODEX_RELEASE=0.150.1
+
+FROM registry.access.redhat.com/ubi9/ubi:9.7 AS codex-cli
+
+ARG CODEX_RELEASE
+ENV CODEX_HOME=/opt/codex-install-home \
+    CODEX_INSTALL_DIR=/opt/codex/bin \
+    CODEX_NON_INTERACTIVE=true
+
+RUN curl -fsSL https://chatgpt.com/codex/install.sh | \
+       sh -s -- --release "${CODEX_RELEASE}" \
+    && /opt/codex/bin/codex --version
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.7
+
+ARG CODEX_RELEASE
+
+COPY --from=codex-cli --chown=1001:root /opt/codex /opt/codex
+COPY --from=codex-cli --chown=1001:root /opt/codex-install-home /opt/codex-install-home
+COPY --chown=1001:root docker/entrypoint.sh /usr/local/bin/codex-creator-entrypoint
+
 # Runtime image for the Quarkus native executable.
 # Build the executable first with:
 # ./mvnw -DskipTests -Dnative -Dquarkus.native.container-build=true package
 ###
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.7
-
 WORKDIR /work/
 
 # ubi-minimal already provides curl-minimal for the Compose readiness probe.
-RUN chown 1001 /work \
+ENV PATH=/opt/codex/bin:/opt/codex-install-home/packages/standalone/current/codex-resources:${PATH} \
+    HOME=/data/codex-creator \
+    CODEX_HOME=/data/codex-creator/.codex
+
+RUN mkdir -p /data/codex-creator/.codex \
+    && chown -R 1001:root /data/codex-creator \
+    && chown 1001 /work \
     && chmod "g+rwX" /work \
-    && chown 1001:root /work
+    && chown 1001:root /work \
+    && chmod 0755 /usr/local/bin/codex-creator-entrypoint
 
 COPY --chown=1001:root --chmod=0755 target/*-runner /work/application
 
-EXPOSE 8090
 USER 1001
+RUN codex --version
 
-ENTRYPOINT ["./application", "-Dquarkus.http.host=0.0.0.0"]
+EXPOSE 8090
+
+ENTRYPOINT ["/usr/local/bin/codex-creator-entrypoint"]
+CMD ["./application", "-Dquarkus.http.host=0.0.0.0"]

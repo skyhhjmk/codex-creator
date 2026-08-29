@@ -19,6 +19,7 @@ permissions:
 
 env:
   IMAGE_REPOSITORY: ghcr.io/skyhhjmk/codex-creator
+  CODEX_RELEASE: 0.150.1
 
 jobs:
   build-native-image:
@@ -128,6 +129,7 @@ jobs:
 
           docker build \
             -f src/main/docker/Dockerfile.native \
+            --build-arg CODEX_RELEASE="${CODEX_RELEASE}" \
             -t "${IMAGE}:${VERSION}-native" \
             -t "${IMAGE}:sha-${SHORT_SHA}-native" \
             -t "${IMAGE}:${VERSION}" \
@@ -140,6 +142,16 @@ jobs:
             # to the explicit latest-native tag.
             docker tag "${IMAGE}:${VERSION}-native" "${IMAGE}:latest"
           fi
+
+      - name: Verify Codex CLI in image
+        shell: bash
+        run: |
+          IMAGE="${{ steps.release.outputs.image }}"
+          VERSION="${{ steps.release.outputs.version }}"
+          docker run --rm -e EXPECTED_CODEX_RELEASE="${CODEX_RELEASE}" --entrypoint /bin/sh "${IMAGE}:${VERSION}-native" -ec '
+            command -v codex
+            test "$(codex --version)" = "codex-cli ${EXPECTED_CODEX_RELEASE}"
+          '
 
       - name: Push native images to GHCR
         if: steps.release.outputs.push_image == 'true'
