@@ -42,7 +42,7 @@ COPY --chown=1001:root --chmod=0755 target/*-runner /work/application
 USER 1001
 RUN codex --version
 
-EXPOSE 8090
+EXPOSE 8681
 
 ENTRYPOINT ["/usr/local/bin/codex-creator-entrypoint"]
 CMD ["./application", "-Dquarkus.http.host=0.0.0.0"]

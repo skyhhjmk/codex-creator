@@ -35,6 +35,6 @@ RUN mkdir -p /data/codex-creator/.codex /deployments/logs \
     && codex --version
 
 USER 10001
-EXPOSE 8090
+EXPOSE 8681
 ENTRYPOINT ["/usr/local/bin/codex-creator-entrypoint"]
 CMD ["java", "-jar", "/deployments/quarkus-run.jar"]

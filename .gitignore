@@ -1,4 +1,5 @@
 target/
+.quarkus/
 .idea/
 .vscode/
 .env
