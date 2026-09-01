@@ -28,11 +28,12 @@ is available.
 cp .env.example .env
 ./mvnw test
 ./mvnw package -DskipTests
-docker compose --env-file .env up --build
+docker compose --env-file .env up -d db redis
 ```
 
-For a direct JVM or native run, load the same `.env` before starting the
-process so the `DB_*`/`POSTGRES_*` and `REDIS_*` fallbacks are available:
+The Compose command above starts only PostgreSQL and Redis. They are published
+on loopback ports `55433` and `56380` for a host-side Codex Creator process.
+Start the application itself in the terminal with the same `.env` loaded:
 
 ```bash
 set -a

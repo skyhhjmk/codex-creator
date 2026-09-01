@@ -3,6 +3,8 @@ services:
     image: ${CODEX_CREATOR_POSTGRES_IMAGE:-pgvector/pgvector:pg18}
     networks:
       - internal
+    ports:
+      - "${CODEX_CREATOR_DB_HOST_BIND_IP:-127.0.0.1}:${CODEX_CREATOR_DB_HOST_PORT:-55433}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-${DB_NAME:-codex_creator}}
       POSTGRES_USER: ${POSTGRES_USER:-${DB_USERNAME:-codex_creator}}
@@ -19,6 +21,8 @@ services:
     image: redis:8-alpine
     networks:
       - internal
+    ports:
+      - "${CODEX_CREATOR_REDIS_HOST_BIND_IP:-127.0.0.1}:${CODEX_CREATOR_REDIS_HOST_PORT:-56380}:6379"
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
