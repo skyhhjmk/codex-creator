@@ -31,6 +31,18 @@ cp .env.example .env
 docker compose --env-file .env up --build
 ```
 
+For a direct JVM or native run, load the same `.env` before starting the
+process so the `DB_*`/`POSTGRES_*` and `REDIS_*` fallbacks are available:
+
+```bash
+set -a
+. ./.env
+set +a
+java -jar target/quarkus-app/quarkus-run.jar
+# Or, after a native build:
+# ./target/*-runner
+```
+
 The `master`/`main` GitHub Actions workflow builds the Quarkus native
 executable and publishes `ghcr.io/skyhhjmk/codex-creator`. Release builds are
 published as `<version>-native` and `sha-<commit>-native`; `latest-native` is
