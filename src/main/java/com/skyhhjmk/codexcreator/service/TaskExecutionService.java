@@ -12,12 +12,17 @@ import com.skyhhjmk.codexcreator.api.RuntimeInferenceResponse;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.persistence.LockModeType;
 import jakarta.transaction.Transactional;
 
 import java.time.OffsetDateTime;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
@@ -40,6 +45,9 @@ public class TaskExecutionService {
     @Inject
     TaskCacheService taskCache;
 
+    /** In-process guard; Redis below makes recovery single-owner across instances. */
+    private final Set<Long> activeTaskIds = ConcurrentHashMap.newKeySet();
+
     public CompletableFuture<RuntimeInferenceResponse> infer(RuntimeInferenceRequest request) {
         if (request == null || request.operation() == null || request.operation().isBlank()
                 || request.profileId() == null || request.profileId().isBlank()
@@ -50,17 +58,47 @@ public class TaskExecutionService {
         }
         String cacheKey = CacheKey.forTask(mapper, request.operation(), request.input(),
                 request.profileId(), request.promptVersion());
-        AutomationTask existing = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
-        if (existing != null) return CompletableFuture.completedFuture(self.get().snapshot(existing.id));
-
         TaskContext context;
-        try {
-            context = self.get().createTask(request);
-        } catch (RuntimeException exception) {
-            // A concurrent request may have won the unique idempotency key race.
-            AutomationTask winner = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
-            if (winner != null) return CompletableFuture.completedFuture(self.get().snapshot(winner.id));
-            return CompletableFuture.failedFuture(exception);
+        AutomationTask existing = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
+        if (existing != null) {
+            if (!matches(existing, request)) {
+                return CompletableFuture.failedFuture(new IllegalArgumentException(
+                        "idempotency key is already bound to a different task"));
+            }
+            TaskContext retryContext = "FAILED".equals(existing.status)
+                    ? self.get().requeueFailedTask(existing.id) : null;
+            if (retryContext == null) {
+                return CompletableFuture.completedFuture(self.get().snapshot(existing.id));
+            }
+            // Continue through the normal provider/lock/retry path below. The
+            // durable task row is reused, so a manual retry cannot create a
+            // second task for the same request.
+            context = retryContext;
+        } else {
+            context = null;
+        }
+
+        if (context == null) {
+            try {
+                context = self.get().createTask(request);
+            } catch (RuntimeException exception) {
+                // A concurrent request may have won the unique idempotency key race.
+                AutomationTask winner = self.get().findByIdempotencyInTransaction(request.idempotencyKey());
+                if (winner != null) {
+                    if (!matches(winner, request)) {
+                        return CompletableFuture.failedFuture(new IllegalArgumentException(
+                                "idempotency key is already bound to a different task"));
+                    }
+                    TaskContext concurrentRetry = "FAILED".equals(winner.status)
+                            ? self.get().requeueFailedTask(winner.id) : null;
+                    if (concurrentRetry == null) {
+                        return CompletableFuture.completedFuture(self.get().snapshot(winner.id));
+                    }
+                    context = concurrentRetry;
+                } else {
+                    return CompletableFuture.failedFuture(exception);
+                }
+            }
         }
 
         ProviderAdapter adapter;
@@ -70,27 +108,129 @@ public class TaskExecutionService {
             self.get().fail(context.taskId(), "PROVIDER_UNAVAILABLE", exception.getMessage());
             return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
         }
-        return executeWithCacheLock(context, request, adapter, cacheKey,
-                Math.max(0, runtimeConfig.lockWaitSeconds() * 4));
+        // Topic discovery and article writing must retain the app-server search
+        // provenance captured for that invocation. Replaying only the cached
+        // model JSON would make a fresh task look as if no web search occurred.
+        boolean cacheOutput = isOutputCacheable(request.operation());
+        TaskContext executionContext = context;
+        activeTaskIds.add(executionContext.taskId());
+        try {
+            return executeWithCacheLock(executionContext, request, adapter, cacheKey,
+                    Math.max(0, runtimeConfig.lockWaitSeconds() * 4), cacheOutput)
+                    .whenComplete((ignored, error) -> activeTaskIds.remove(executionContext.taskId()));
+        } catch (RuntimeException exception) {
+            activeTaskIds.remove(executionContext.taskId());
+            throw exception;
+        }
+    }
+
+    /** Replays durable non-terminal tasks after an application restart. */
+    @io.quarkus.scheduler.Scheduled(every = "30s", identity = "codex-task-recovery")
+    void recoverOrphanedTasks() {
+        for (RecoveryCandidate candidate : self.get().recoverableTasks()) {
+            if (!activeTaskIds.add(candidate.taskId())) continue;
+            String lockKey = "task-recovery-" + candidate.taskId();
+            TaskCacheService.LockAttempt lock = taskCache.acquire(lockKey,
+                    Duration.ofSeconds(Math.max(30, runtimeConfig.lockTtlSeconds())));
+            if (lock.status() != TaskCacheService.LockStatus.ACQUIRED) {
+                activeTaskIds.remove(candidate.taskId());
+                continue;
+            }
+            try {
+                RecoveryCandidate claimed = self.get().claimRecovery(candidate.taskId());
+                if (claimed == null) {
+                    activeTaskIds.remove(candidate.taskId());
+                    taskCache.release(lockKey, lock.token());
+                    continue;
+                }
+                ProviderAdapter adapter = providerRegistry.resolve(claimed.profile());
+                RuntimeInferenceRequest request = new RuntimeInferenceRequest(
+                        claimed.operation(), claimed.profile().profileId, claimed.input(),
+                        claimed.idempotencyKey(), claimed.traceId(), "1");
+                String cacheKey = CacheKey.forTask(mapper, request.operation(), request.input(),
+                        request.profileId(), request.promptVersion());
+                executeWithCacheLock(new TaskContext(claimed.taskId(), claimed.profile()), request,
+                        adapter, cacheKey, Math.max(0, runtimeConfig.lockWaitSeconds() * 4),
+                        isOutputCacheable(request.operation()))
+                        .whenComplete((ignored, error) -> {
+                            activeTaskIds.remove(claimed.taskId());
+                            taskCache.release(lockKey, lock.token());
+                        });
+            } catch (RuntimeException exception) {
+                self.get().fail(candidate.taskId(), "RECOVERY_FAILED", rootMessage(exception));
+                activeTaskIds.remove(candidate.taskId());
+                taskCache.release(lockKey, lock.token());
+            }
+        }
+    }
+
+    @Transactional
+    List<RecoveryCandidate> recoverableTasks() {
+        OffsetDateTime now = OffsetDateTime.now();
+        return AutomationTask.<AutomationTask>find(
+                        "status = ?1 or status = ?2 or status = ?3", "QUEUED", "RUNNING", "RETRYING")
+                .page(0, 50).list().stream()
+                .filter(task -> !"RETRYING".equals(task.status)
+                        || task.nextAttemptAt == null || !task.nextAttemptAt.isAfter(now))
+                .map(this::recoveryCandidate)
+                .toList();
+    }
+
+    @Transactional
+    RecoveryCandidate claimRecovery(Long taskId) {
+        AutomationTask task = AutomationTask.find("id", taskId)
+                .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
+        if (task == null || "SUCCEEDED".equals(task.status) || "FAILED".equals(task.status)) return null;
+        if ("RETRYING".equals(task.status) && task.nextAttemptAt != null
+                && task.nextAttemptAt.isAfter(OffsetDateTime.now())) return null;
+        if (task.profile == null || parse(task.inputJson) == null) {
+            task.status = "FAILED";
+            task.errorCode = "INVALID_TASK";
+            task.errorMessage = "durable task input or profile is invalid";
+            task.completedAt = OffsetDateTime.now();
+            return null;
+        }
+        if (task.attemptCount >= Math.max(1, runtimeConfig.maxAttempts())) {
+            task.status = "FAILED";
+            task.errorCode = "PROVIDER_ERROR";
+            task.errorMessage = "maximum task attempts exhausted during recovery";
+            task.completedAt = OffsetDateTime.now();
+            return null;
+        }
+        if ("RUNNING".equals(task.status)) {
+            TaskAttempt attempt = latestAttempt(task);
+            if (attempt != null && "RUNNING".equals(attempt.status)) {
+                attempt.status = "FAILED";
+                attempt.completedAt = OffsetDateTime.now();
+                attempt.errorCode = "TASK_RECOVERED";
+                attempt.errorMessage = "previous process ended while the task was running";
+            }
+        }
+        task.status = "QUEUED";
+        task.nextAttemptAt = null;
+        return recoveryCandidate(task);
     }
 
     private CompletableFuture<RuntimeInferenceResponse> executeWithCacheLock(TaskContext context,
                                                                                 RuntimeInferenceRequest request,
                                                                                 ProviderAdapter adapter,
                                                                                 String cacheKey,
-                                                                                int remainingPolls) {
-        var cached = taskCache.get(cacheKey);
-        if (cached.isPresent()) return completeFromCache(context.taskId(), cached.get(), cacheKey);
+                                                                                int remainingPolls,
+                                                                                boolean cacheOutput) {
+        if (cacheOutput) {
+            var cached = taskCache.get(cacheKey);
+            if (cached.isPresent()) return completeFromCache(context.taskId(), cached.get(), cacheKey);
+        }
 
         TaskCacheService.LockAttempt lock = taskCache.acquire(cacheKey,
                 Duration.ofSeconds(Math.max(1, runtimeConfig.lockTtlSeconds())));
         if (lock.status() == TaskCacheService.LockStatus.UNAVAILABLE) {
             // Redis is deliberately best-effort. Continue without a lock when it
             // is down, while retaining durable PostgreSQL task state.
-            return invokeWithRetries(context, request, adapter, cacheKey, 0);
+            return invokeWithRetries(context, request, adapter, cacheKey, 0, cacheOutput);
         }
         if (lock.status() == TaskCacheService.LockStatus.ACQUIRED) {
-            return invokeWithRetries(context, request, adapter, cacheKey, 0)
+            return invokeWithRetries(context, request, adapter, cacheKey, 0, cacheOutput)
                     .whenComplete((ignored, error) -> taskCache.release(cacheKey, lock.token()));
         }
         if (remainingPolls <= 0) {
@@ -99,7 +239,8 @@ public class TaskExecutionService {
             return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
         }
         return delayed(Duration.ofMillis(250))
-                .thenCompose(ignored -> executeWithCacheLock(context, request, adapter, cacheKey, remainingPolls - 1));
+                .thenCompose(ignored -> executeWithCacheLock(context, request, adapter, cacheKey,
+                        remainingPolls - 1, cacheOutput));
     }
 
     private CompletableFuture<RuntimeInferenceResponse> completeFromCache(Long taskId, JsonNode output, String cacheKey) {
@@ -112,7 +253,8 @@ public class TaskExecutionService {
                                                                             RuntimeInferenceRequest request,
                                                                             ProviderAdapter adapter,
                                                                             String cacheKey,
-                                                                            int attemptIndex) {
+                                                                            int attemptIndex,
+                                                                            boolean cacheOutput) {
         self.get().markStarted(context.taskId(), adapter.getClass().getSimpleName());
         ProviderRequest providerRequest = new ProviderRequest(request.operation(), context.profile(), request.input(),
                 request.traceId(), context.taskId());
@@ -124,7 +266,9 @@ public class TaskExecutionService {
         }
         return providerFuture.handle((response, error) -> {
             if (error == null && response != null) {
-                taskCache.put(cacheKey, response.output(), Duration.ofMinutes(30));
+                if (cacheOutput) {
+                    taskCache.put(cacheKey, response.output(), Duration.ofMinutes(30));
+                }
                 self.get().complete(context.taskId(), response);
                 return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
             }
@@ -135,11 +279,40 @@ public class TaskExecutionService {
                 Duration delay = retryDelay(attemptIndex);
                 self.get().recordAttemptFailure(context.taskId(), "PROVIDER_ERROR", message, delay);
                 return delayed(delay).thenCompose(ignored ->
-                        invokeWithRetries(context, request, adapter, cacheKey, attemptIndex + 1));
+                        invokeWithRetries(context, request, adapter, cacheKey, attemptIndex + 1, cacheOutput));
             }
             self.get().fail(context.taskId(), "PROVIDER_ERROR", message);
             return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
         }).thenCompose(stage -> stage);
+    }
+
+    private static boolean isOutputCacheable(String operation) {
+        return !"topic".equalsIgnoreCase(operation) && !"article".equalsIgnoreCase(operation);
+    }
+
+    private boolean allowsOperation(ModelProfile profile, String operation) {
+        try {
+            JsonNode allowed = mapper.readTree(profile.allowedOperations == null ? "[]" : profile.allowedOperations);
+            if (!allowed.isArray()) return false;
+            for (JsonNode value : allowed) {
+                if (value.isTextual() && value.asText().equalsIgnoreCase(operation)) return true;
+            }
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean matches(AutomationTask task, RuntimeInferenceRequest request) {
+        if (!Objects.equals(task.operation, request.operation())
+                || task.profile == null || !Objects.equals(task.profile.profileId, request.profileId())) {
+            return false;
+        }
+        try {
+            return mapper.readTree(task.inputJson).equals(request.input());
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private Duration retryDelay(int attemptIndex) {
@@ -159,6 +332,9 @@ public class TaskExecutionService {
         if (profile == null || !profile.enabled) {
             throw new IllegalArgumentException("model profile is not available: " + request.profileId());
         }
+        if (!allowsOperation(profile, request.operation())) {
+            throw new IllegalArgumentException("operation is not allowed for model profile: " + request.operation());
+        }
         AutomationTask task = new AutomationTask();
         task.operation = request.operation();
         task.profile = profile;
@@ -176,6 +352,8 @@ public class TaskExecutionService {
     void markStarted(Long taskId, String provider) {
         AutomationTask task = findById(taskId);
         if (task == null) return;
+        TaskAttempt previousAttempt = latestAttempt(task);
+        int nextAttemptNumber = previousAttempt == null ? 1 : previousAttempt.attemptNumber + 1;
         task.status = "RUNNING";
         task.startedAt = OffsetDateTime.now();
         task.completedAt = null;
@@ -185,7 +363,7 @@ public class TaskExecutionService {
         task.attemptCount++;
         TaskAttempt attempt = new TaskAttempt();
         attempt.task = task;
-        attempt.attemptNumber = task.attemptCount;
+        attempt.attemptNumber = nextAttemptNumber;
         attempt.provider = provider;
         attempt.status = "RUNNING";
         attempt.startedAt = task.startedAt;
@@ -265,6 +443,24 @@ public class TaskExecutionService {
         return AutomationTask.find("idempotencyKey", key).firstResult();
     }
 
+    /** Requeue an explicitly retried terminal task without changing its idempotency key. */
+    @Transactional
+    TaskContext requeueFailedTask(Long taskId) {
+        AutomationTask task = AutomationTask.find("id = ?1", taskId)
+                .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
+        if (task == null || !"FAILED".equals(task.status)) return null;
+        task.status = "QUEUED";
+        task.errorCode = null;
+        task.errorMessage = null;
+        task.completedAt = null;
+        task.nextAttemptAt = null;
+        task.outputJson = null;
+        task.usageJson = null;
+        task.provenanceJson = null;
+        task.attemptCount = 0;
+        return new TaskContext(task.id, task.profile);
+    }
+
     private AutomationTask findById(Long id) {
         return id == null ? null : AutomationTask.findById(id);
     }
@@ -300,4 +496,13 @@ public class TaskExecutionService {
     }
 
     private record TaskContext(Long taskId, ModelProfile profile) {}
+
+    private RecoveryCandidate recoveryCandidate(AutomationTask task) {
+        return new RecoveryCandidate(task.id, task.operation, task.profile, parse(task.inputJson),
+                task.idempotencyKey, task.traceId, task.attemptCount);
+    }
+
+    private record RecoveryCandidate(Long taskId, String operation, ModelProfile profile,
+                                     JsonNode input, String idempotencyKey, String traceId,
+                                     int attemptCount) {}
 }

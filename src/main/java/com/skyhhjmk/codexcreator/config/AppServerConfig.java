@@ -27,4 +27,16 @@ public interface AppServerConfig {
 
     @WithDefault("unlocked")
     String schemaVersion();
+
+    @WithDefault("true")
+    boolean windblogMcpEnabled();
+
+    @WithDefault("http://127.0.0.1:8681/mcp")
+    String windblogMcpUrl();
+
+    @WithDefault("CODEX_CREATOR_MCP_BEARER_TOKEN")
+    String windblogMcpBearerTokenEnvVar();
+
+    @WithDefault("auto")
+    String windblogMcpToolsApprovalMode();
 }

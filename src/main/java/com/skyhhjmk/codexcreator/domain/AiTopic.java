@@ -30,6 +30,25 @@ public class AiTopic extends PanacheEntityBase {
     @Column(nullable = false, length = 32)
     public String status = "SUGGESTED";
 
+    @Column(name = "dedupe_key", nullable = false, unique = true, length = 64)
+    public String dedupeKey;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "discovery_run_id")
+    public TopicDiscoveryRun discoveryRun;
+
+    @Column(name = "last_seen_at", nullable = false)
+    public OffsetDateTime lastSeenAt;
+
+    @Column(name = "occurrence_count", nullable = false)
+    public int occurrenceCount = 1;
+
+    @Column(name = "review_note", columnDefinition = "text")
+    public String reviewNote;
+
+    @Column(name = "updated_at", nullable = false)
+    public OffsetDateTime updatedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     public OffsetDateTime createdAt;
 

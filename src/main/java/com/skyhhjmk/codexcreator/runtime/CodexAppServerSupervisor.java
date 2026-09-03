@@ -12,6 +12,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,6 +30,7 @@ public class CodexAppServerSupervisor {
 
     private final AtomicBoolean starting = new AtomicBoolean();
     private final CopyOnWriteArrayList<Consumer<ObjectNode>> listeners = new CopyOnWriteArrayList<>();
+    private final ConcurrentMap<String, CopyOnWriteArrayList<ObjectNode>> completedItems = new ConcurrentHashMap<>();
     private final Object lifecycleLock = new Object();
     private volatile JsonRpcClient client;
     private volatile CompletableFuture<Void> ready = CompletableFuture.failedFuture(
@@ -55,6 +57,7 @@ public class CodexAppServerSupervisor {
                         .start();
                 JsonRpcClient next = new JsonRpcClient(mapper, this::handleServerRequest);
                 next.attach(process);
+                next.addNotificationListener(this::captureCompletedItem);
                 listeners.forEach(next::addNotificationListener);
                 client = next;
                 startedAt = System.currentTimeMillis();
@@ -121,8 +124,11 @@ public class CodexAppServerSupervisor {
         return request("model/list", params);
     }
 
-    public CompletableFuture<JsonNode> awaitTurnCompletion(String threadId, String turnId) {
-        CompletableFuture<JsonNode> result = new CompletableFuture<>();
+    public CompletableFuture<AppServerTurnResult> awaitTurnCompletion(String threadId, String turnId) {
+        CompletableFuture<AppServerTurnResult> result = new CompletableFuture<>();
+        String eventKey = eventKey(threadId, turnId);
+        List<ObjectNode> bufferedItems = new CopyOnWriteArrayList<>(
+                completedItems.getOrDefault(eventKey, new CopyOnWriteArrayList<>()));
         Consumer<ObjectNode> listener = message -> {
             if (!"turn/completed".equals(message.path("method").asText())) return;
             JsonNode params = message.path("params");
@@ -134,13 +140,55 @@ public class CodexAppServerSupervisor {
                     || params.path("turn").path("threadId").asText("").equals(threadId);
             boolean turnMatches = turnId == null || turnId.isBlank() || turnId.equals(eventTurnId);
             if (threadMatches && turnMatches) {
-                result.complete(params);
+                List<ObjectNode> items = new ArrayList<>(bufferedItems);
+                Set<String> seen = new LinkedHashSet<>();
+                items.forEach(item -> seen.add(item.toString()));
+                completedItems.getOrDefault(eventKey, new CopyOnWriteArrayList<>()).forEach(item -> {
+                    if (seen.add(item.toString())) items.add(item);
+                });
+                JsonNode inlineItems = params.path("turn").path("items");
+                if (inlineItems.isArray()) {
+                    inlineItems.forEach(item -> {
+                        if (item.isObject() && isUsefulItem(item) && seen.add(item.toString())) {
+                            items.add((ObjectNode) item);
+                        }
+                    });
+                }
+                result.complete(new AppServerTurnResult(params, items));
             }
         };
         addNotificationListener(listener);
         result.orTimeout(config.requestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-                .whenComplete((ignored, error) -> removeNotificationListener(listener));
+                .whenComplete((ignored, error) -> {
+                    removeNotificationListener(listener);
+                    completedItems.remove(eventKey);
+                });
         return result;
+    }
+
+    private void captureCompletedItem(ObjectNode message) {
+        if (!"item/completed".equals(message.path("method").asText())) return;
+        JsonNode params = message.path("params");
+        JsonNode item = params.path("item");
+        if (!isUsefulItem(item)) return;
+        String threadId = params.path("threadId").asText(
+                item.path("threadId").asText(params.path("turn").path("threadId").asText("")));
+        String turnId = params.path("turnId").asText(
+                item.path("turnId").asText(params.path("turn").path("id").asText("")));
+        if (threadId.isBlank() || turnId.isBlank()) return;
+        ObjectNode captured = message.deepCopy();
+        captured.put("_capturedAt", Instant.now().toString());
+        completedItems.computeIfAbsent(eventKey(threadId, turnId), ignored -> new CopyOnWriteArrayList<>())
+                .add(captured);
+    }
+
+    private static boolean isUsefulItem(JsonNode item) {
+        String type = item == null ? "" : item.path("type").asText("");
+        return "webSearch".equals(type) || "agentMessage".equals(type);
+    }
+
+    private static String eventKey(String threadId, String turnId) {
+        return (threadId == null ? "" : threadId) + "\n" + (turnId == null ? "" : turnId);
     }
 
     public void removeNotificationListener(Consumer<ObjectNode> listener) {
@@ -189,16 +237,31 @@ public class CodexAppServerSupervisor {
     private List<String> command() {
         String raw = config.command();
         List<String> command = new ArrayList<>(List.of(raw.split("\\s+")));
+        if (config.windblogMcpEnabled()) {
+            command.add("-c");
+            command.add("mcp_servers.windblog.url=\"" + escapeToml(config.windblogMcpUrl()) + "\"");
+            command.add("-c");
+            command.add("mcp_servers.windblog.bearer_token_env_var=\""
+                    + escapeToml(config.windblogMcpBearerTokenEnvVar()) + "\"");
+            command.add("-c");
+            command.add("mcp_servers.windblog.default_tools_approval_mode=\""
+                    + escapeToml(config.windblogMcpToolsApprovalMode()) + "\"");
+        }
         command.add("app-server");
         command.add("--listen");
         command.add("stdio://");
         return command;
     }
 
+    private static String escapeToml(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     private JsonNode handleServerRequest(ObjectNode request) {
-        String method = request.path("method").asText("");
+        String method = request.path("method").asText("").toLowerCase(Locale.ROOT);
         // Workflows are denied by default. An operator can add a policy-backed handler later.
-        if (method.contains("approval") || method.startsWith("exec/")) {
+        if (method.contains("approval") || method.contains("exec") || method.contains("commandexecution")) {
             ObjectNode decline = mapper.createObjectNode();
             decline.put("decision", "decline");
             return decline;

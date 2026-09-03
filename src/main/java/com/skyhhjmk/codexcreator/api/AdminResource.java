@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.skyhhjmk.codexcreator.domain.*;
 import com.skyhhjmk.codexcreator.runtime.CodexAppServerSupervisor;
+import com.skyhhjmk.codexcreator.service.ArticleJobService;
+import com.skyhhjmk.codexcreator.service.TopicAutomationService;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
@@ -28,11 +30,20 @@ public class AdminResource {
     @Inject
     CodexAppServerSupervisor supervisor;
 
+    @Inject
+    TopicAutomationService topicAutomation;
+
+    @Inject
+    ArticleJobService articleJobs;
+
     @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
     Optional<String> adminToken;
 
     @ConfigProperty(name = "codex.creator.mcp-bearer-token", defaultValue = "")
     Optional<String> mcpToken;
+
+    @ConfigProperty(name = "codex.creator.mcp.write-approval-required", defaultValue = "false")
+    boolean mcpWriteApprovalRequired;
 
     @GET
     @Path("/auth/status")
@@ -115,7 +126,8 @@ public class AdminResource {
     @Path("/workflows")
     public Map<String, Object> workflows() {
         return Map.of("operations", List.of("summarize", "moderate", "translate", "slug",
-                "assistant", "topic", "article", "embedding"), "experimentalApi", false);
+                "assistant", "topic", "article", "embedding", "category.read", "category.write",
+                "tag.read", "tag.write", "media.upload"), "experimentalApi", false);
     }
 
     @GET
@@ -157,11 +169,91 @@ public class AdminResource {
     }
 
     @GET
+    @Path("/topic-automation")
+    public Map<String, Object> topicAutomation() {
+        return Map.of("settings", topicAutomation.settingsView(), "seeds", topicAutomation.seedsView());
+    }
+
+    @GET
+    @Path("/topic-seeds")
+    public List<Map<String, Object>> topicSeeds() {
+        return topicAutomation.seedsView();
+    }
+
+    @POST
+    @Path("/topic-seeds")
+    @Transactional
+    public Map<String, Object> createTopicSeed(JsonNode payload) {
+        return topicAutomation.upsertSeed(null, payload, "CODEX_ADMIN", java.util.UUID.randomUUID().toString());
+    }
+
+    @PUT
+    @Path("/topic-seeds/{id}")
+    @Transactional
+    public Map<String, Object> updateTopicSeed(@PathParam("id") Long id, JsonNode payload) {
+        return topicAutomation.upsertSeed(id, payload, "CODEX_ADMIN", java.util.UUID.randomUUID().toString());
+    }
+
+    @DELETE
+    @Path("/topic-seeds/{id}")
+    @Transactional
+    public Response deleteTopicSeed(@PathParam("id") Long id) {
+        topicAutomation.deleteSeed(id, "CODEX_ADMIN", java.util.UUID.randomUUID().toString());
+        return Response.noContent().build();
+    }
+
+    @POST
+    @Path("/topic-runs")
+    public Map<String, Object> startTopicRun(Map<String, Object> payload) {
+        String key = payload == null ? "" : value(payload.get("idempotencyKey"));
+        return topicAutomation.startManual(key, java.util.UUID.randomUUID().toString(), "CODEX_ADMIN");
+    }
+
+    @GET
+    @Path("/topic-runs/{id}")
+    public Map<String, Object> topicRun(@PathParam("id") Long id) {
+        return topicAutomation.runView(id);
+    }
+
+    @GET
+    @Path("/topic-runs")
+    public Map<String, Object> topicRuns(@QueryParam("page") @DefaultValue("1") int page,
+                                         @QueryParam("pageSize") @DefaultValue("20") int pageSize) {
+        return topicAutomation.listRuns(page, pageSize);
+    }
+
+    @GET
+    @Path("/topics/{id}")
+    public Map<String, Object> topic(@PathParam("id") Long id) {
+        return topicAutomation.topicView(id);
+    }
+
+    @POST
+    @Path("/topics/{id}/review")
+    public Map<String, Object> reviewTopic(@PathParam("id") Long id, Map<String, Object> payload) {
+        String decision = payload == null ? "" : value(payload.get("decision"));
+        String note = payload == null ? "" : value(payload.get("note"));
+        return topicAutomation.reviewTopic(id, decision, note, "CODEX_ADMIN", java.util.UUID.randomUUID().toString());
+    }
+
+    @POST
+    @Path("/article-jobs")
+    public Map<String, Object> startArticleJob(JsonNode payload) {
+        return articleJobs.start(payload, "CODEX_ADMIN", java.util.UUID.randomUUID().toString());
+    }
+
+    @GET
+    @Path("/article-jobs/{id}")
+    public Map<String, Object> articleJob(@PathParam("id") Long id) {
+        return articleJobs.read(id);
+    }
+
+    @GET
     @Path("/integrations")
     public Map<String, Object> integrations() {
         return Map.of("windblog", Map.of("eventEndpoint", "/api/internal/integrations/windblog/events",
                         "signature", "HMAC-SHA256", "replayProtection", "timestamp+nonce"),
-                "mcp", Map.of("endpoint", "/mcp", "writeApprovalRequired", true));
+                "mcp", Map.of("endpoint", "/mcp", "writeApprovalRequired", mcpWriteApprovalRequired));
     }
 
     @GET
