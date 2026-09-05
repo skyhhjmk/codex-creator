@@ -9,11 +9,15 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.ManyToMany;
+import jakarta.persistence.JoinTable;
 import jakarta.persistence.Table;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 @Entity
 @Table(name = "ai_article_jobs")
@@ -45,6 +49,15 @@ public class AiArticleJob extends PanacheEntityBase {
 
     @Column(columnDefinition = "text")
     public String instructions;
+
+    @Column(name = "requires_practical_verification", nullable = false)
+    public boolean requiresPracticalVerification;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(name = "ai_article_job_test_servers",
+            joinColumns = @JoinColumn(name = "article_job_id"),
+            inverseJoinColumns = @JoinColumn(name = "test_server_id"))
+    public Set<TestServer> testServers = new LinkedHashSet<>();
 
     @Column(nullable = false, length = 32)
     public String status = "QUEUED";

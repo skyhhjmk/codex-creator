@@ -31,6 +31,8 @@ ENV PATH=/opt/codex/bin:/opt/codex-install-home/packages/standalone/current/code
     CODEX_HOME=/data/codex-creator/.codex
 
 RUN mkdir -p /data/codex-creator/.codex \
+    && microdnf install -y openssh-clients \
+    && microdnf clean all \
     && chown -R 1001:root /data/codex-creator \
     && chown 1001 /work \
     && chmod "g+rwX" /work \

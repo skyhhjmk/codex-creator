@@ -7,4 +7,5 @@
     <include file="db/changelog/003-content-tools.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/004-article-quality.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/005-model-selection.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/006-test-servers.sql" relativeToChangelogFile="false"/>
 </databaseChangeLog>

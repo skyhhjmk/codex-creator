@@ -6,6 +6,7 @@ import com.skyhhjmk.codexcreator.domain.*;
 import com.skyhhjmk.codexcreator.runtime.CodexAppServerSupervisor;
 import com.skyhhjmk.codexcreator.service.ArticleJobService;
 import com.skyhhjmk.codexcreator.service.TopicAutomationService;
+import com.skyhhjmk.codexcreator.service.TestServerService;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.*;
@@ -35,6 +36,7 @@ public class AdminResource {
 
     @Inject
     ArticleJobService articleJobs;
+    @Inject TestServerService testServers;
 
     @ConfigProperty(name = "codex.creator.admin-token", defaultValue = "")
     Optional<String> adminToken;
@@ -167,6 +169,12 @@ public class AdminResource {
             return view;
         }).toList();
     }
+
+    @GET @Path("/test-servers") public List<Map<String,Object>> testServers() { return testServers.list(); }
+    @GET @Path("/test-servers/setup-guide") public Map<String,Object> testServerSetupGuide() { return testServers.setupGuide(); }
+    @POST @Path("/test-servers") @Transactional public Response createTestServer(Map<String,Object> payload) { return Response.status(Response.Status.CREATED).entity(testServers.save(null,payload)).build(); }
+    @PUT @Path("/test-servers/{id}") @Transactional public Map<String,Object> updateTestServer(@PathParam("id") Long id, Map<String,Object> payload) { return testServers.save(id,payload); }
+    @DELETE @Path("/test-servers/{id}") @Transactional public Response deleteTestServer(@PathParam("id") Long id) { testServers.delete(id); return Response.noContent().build(); }
 
     @GET
     @Path("/topic-automation")

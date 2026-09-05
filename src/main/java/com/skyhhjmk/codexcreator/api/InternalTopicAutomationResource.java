@@ -6,6 +6,7 @@ import com.skyhhjmk.codexcreator.security.InternalRequestVerifier;
 import com.skyhhjmk.codexcreator.service.ArticleJobService;
 import com.skyhhjmk.codexcreator.service.ModelCatalogService;
 import com.skyhhjmk.codexcreator.service.TopicAutomationService;
+import com.skyhhjmk.codexcreator.service.TestServerService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -35,6 +36,7 @@ public class InternalTopicAutomationResource {
 
     @Inject
     ModelCatalogService models;
+    @Inject TestServerService testServers;
 
     @POST
     public Response command(String body,
@@ -61,6 +63,11 @@ public class InternalTopicAutomationResource {
 
     private Response dispatch(String command, JsonNode payload, String actorId, String traceId) {
         return switch (command) {
+            case "test-servers.list" -> ok(Map.of("items", testServers.list()));
+            case "test-servers.setup-guide" -> ok(testServers.setupGuide());
+            case "test-servers.create" -> ok(testServers.save(null, mapper.convertValue(payload, Map.class)));
+            case "test-servers.update" -> ok(testServers.save(requiredId(payload,"id"), mapper.convertValue(payload, Map.class)));
+            case "test-servers.delete" -> { testServers.delete(requiredId(payload,"id")); yield ok(Map.of("success",true)); }
             case "settings.read" -> ok(topics.settingsView());
             case "settings.update" -> ok(topics.updateSettings(payload, actorId, traceId));
             case "seeds.list" -> ok(Map.of("items", topics.seedsView()));

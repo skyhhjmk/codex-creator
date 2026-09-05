@@ -10,6 +10,7 @@ import com.skyhhjmk.codexcreator.domain.AiArticleJob;
 import com.skyhhjmk.codexcreator.domain.AiTopic;
 import com.skyhhjmk.codexcreator.domain.AutomationTask;
 import com.skyhhjmk.codexcreator.domain.ModelProfile;
+import com.skyhhjmk.codexcreator.domain.TestServer;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -47,6 +48,9 @@ public class ArticleJobService {
     @Inject
     ModelCatalogService modelCatalog;
 
+    @Inject
+    TestServerService testServers;
+
     @ConfigProperty(name = "codex.creator.default-profile-id", defaultValue = "codex-default")
     String defaultProfileId;
 
@@ -60,7 +64,13 @@ public class ArticleJobService {
         long topicId = requiredLong(payload, "topicId");
         Long categoryId = optionalLong(payload, "categoryId");
         String language = text(payload, "language", "zh-CN");
-        String instructions = text(payload, "instructions", "");
+        String requestedInstructions = text(payload, "instructions", "");
+        boolean practicalVerification = payload.path("requiresPracticalVerification").asBoolean(false);
+        List<Long> testServerIds = payload.path("testServerIds").isArray()
+                ? java.util.stream.StreamSupport.stream(payload.path("testServerIds").spliterator(), false)
+                .filter(JsonNode::canConvertToLong).map(JsonNode::asLong).distinct().toList() : List.of();
+        if (practicalVerification && testServerIds.isEmpty()) throw new IllegalArgumentException("a verification server is required");
+        final String instructions = practicalVerification ? requestedInstructions + "\n\n实操验证已启用。必须在分配的测试服务器上执行教程关键命令，按实际结果修正文稿；不要编造验证结果。服务器编号：" + testServerIds : requestedInstructions;
         String profileId = modelCatalog.resolve(text(payload, "profileId", ""), defaultProfileId, "article");
         String requestKey = text(payload, "requestKey", "");
         if (requestKey.isBlank()) requestKey = "article-" + UUID.randomUUID();
@@ -102,7 +112,8 @@ public class ArticleJobService {
         JobContext context;
         try {
             context = inTransaction(() -> createJob(
-                    topicId, categoryId, language, instructions, resolvedRequestKey, actorId, traceId, profileId));
+                    topicId, categoryId, language, instructions, practicalVerification, testServerIds,
+                    resolvedRequestKey, actorId, traceId, profileId));
         } catch (RuntimeException exception) {
             AiArticleJob winner = AiArticleJob.find("requestKey", requestKey).firstResult();
             if (winner == null) throw exception;
@@ -131,6 +142,7 @@ public class ArticleJobService {
 
     @Transactional
     JobContext createJob(Long topicId, Long categoryId, String language, String instructions,
+                         boolean practicalVerification, List<Long> testServerIds,
                          String requestKey, String actorId, String traceId, String profileId) {
         AiTopic topic = AiTopic.find("id", topicId)
                 .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
@@ -148,6 +160,10 @@ public class ArticleJobService {
         job.targetCategoryId = categoryId;
         job.language = language;
         job.instructions = instructions;
+        job.requiresPracticalVerification = practicalVerification;
+        if (practicalVerification) {
+            for (Long serverId : testServerIds) job.testServers.add(testServers.enabled(serverId));
+        }
         job.status = "QUEUED";
         job.generationAttempt = 1;
         job.qualityAttempt = 1;
@@ -157,7 +173,8 @@ public class ArticleJobService {
         job.updatedAt = job.createdAt;
         job.persist();
         auditLogService.log("WINDBLOG_ADMIN", actorId, "article.job.created", "ai_article_job",
-                String.valueOf(job.id), traceId, Map.of("topicId", topicId, "language", language));
+                String.valueOf(job.id), traceId, Map.of("topicId", topicId, "language", language,
+                "requiresPracticalVerification", practicalVerification, "testServerIds", testServerIds));
         return new JobContext(job.id, topic.id, topic.title, topic.rationale, topic.source,
                 language, instructions, requestKey, traceId, 1, null, null, profileId);
     }
@@ -471,6 +488,8 @@ public class ArticleJobService {
         view.put("targetCategoryId", job.targetCategoryId);
         view.put("language", job.language);
         view.put("instructions", job.instructions == null ? "" : job.instructions);
+        view.put("requiresPracticalVerification", job.requiresPracticalVerification);
+        view.put("testServerIds", job.testServers.stream().map(server -> server.id).toList());
         view.put("status", job.status);
         view.put("taskStatus", job.task == null ? null : job.task.status);
         view.put("nextAttemptAt", job.task == null ? null : job.task.nextAttemptAt);
@@ -504,6 +523,11 @@ public class ArticleJobService {
                 address every reported issue, re-check the supporting pages with web search, and return only the improved final JSON.
                 Do not mention the critique, score, retry, model, prompt, or writing process in the article.
                 """;
+        AiArticleJob currentJob = AiArticleJob.findById(context.jobId());
+        String verification = currentJob != null && currentJob.requiresPracticalVerification ? """
+
+                Practical verification is required. Before returning the draft, use windblog.run_test_server_command to execute the tutorial's meaningful commands on every appropriate assigned server. Supply articleJobId=%d and one of the assigned server IDs %s. Use command output to correct commands, package names, paths, ports, and version claims. If a command fails, either fix the tutorial and re-run it or state its environment constraint accurately; never claim an unexecuted command was verified.
+                """.formatted(context.jobId(), currentJob.testServers.stream().map(server -> server.id).toList()) : "";
         return """
                 You are WindBlog's senior editor and evidence-led columnist. Produce an original, publication-ready article in %s.
                 The input contains the exact topic title, its research rationale, collected topic sources, and optional editor instructions.
@@ -527,11 +551,12 @@ public class ArticleJobService {
 
                 Category and tool contract:
                 - If the administrator supplied no category, call windblog.list_categories and select the best existing category. Create one concise category only when none fits. Return its numeric id, or JSON null when unavailable.
-                - You may use only built-in web search, built-in image generation when available, and the allowlisted WindBlog MCP category/tag/media tools. Never use shell, local files, SQL, arbitrary URLs as upload inputs, or copy a source page.
+                - You may use only built-in web search, built-in image generation when available, and allowlisted WindBlog MCP tools. Never use local files, SQL, arbitrary URLs as upload inputs, or copy a source page.
 
                 Return only JSON matching the schema: title, summary, editorialThesis, categoryId, contentMarkdown, and sources.
+                %s
                 Additional editor instructions are subordinate to the accuracy, citation, safety, and output contracts: %s
-                """.formatted(context.language(), repair, context.instructions());
+                """.formatted(context.language(), repair, verification, context.instructions());
     }
 
     private JobContext context(AiArticleJob job, JsonNode previousDraft, JsonNode qualityFeedback) {
