@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.skyhhjmk.codexcreator.security.InternalRequestVerifier;
 import com.skyhhjmk.codexcreator.service.ArticleJobService;
+import com.skyhhjmk.codexcreator.service.ModelCatalogService;
 import com.skyhhjmk.codexcreator.service.TopicAutomationService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -31,6 +32,9 @@ public class InternalTopicAutomationResource {
 
     @Inject
     ArticleJobService articles;
+
+    @Inject
+    ModelCatalogService models;
 
     @POST
     public Response command(String body,
@@ -65,7 +69,11 @@ public class InternalTopicAutomationResource {
                 topics.deleteSeed(requiredId(payload, "id"), actorId, traceId);
                 yield ok(Map.of("success", true));
             }
-            case "runs.start" -> ok(topics.startManual(text(payload, "idempotencyKey", ""), traceId, actorId));
+            case "models.list" -> ok(Map.of(
+                    "topic", models.options("topic"),
+                    "article", models.options("article")));
+            case "runs.start" -> ok(topics.startManual(text(payload, "idempotencyKey", ""), traceId, actorId,
+                    text(payload, "profileId", "")));
             case "runs.read" -> ok(topics.runView(requiredId(payload, "id")));
             case "runs.list" -> ok(topics.listRuns(integer(payload, "page", 1), integer(payload, "pageSize", 20)));
             case "topics.list" -> ok(topics.listTopics(text(payload, "status", ""),
@@ -74,6 +82,8 @@ public class InternalTopicAutomationResource {
             case "topics.review" -> ok(topics.reviewTopic(requiredId(payload, "id"),
                     text(payload, "decision", ""), text(payload, "note", ""), actorId, traceId));
             case "article.start" -> ok(articles.start(payload, actorId, traceId));
+            case "article.regenerate" -> ok(articles.regenerate(requiredId(payload, "id"), actorId, traceId,
+                    text(payload, "profileId", "")));
             case "article.read" -> ok(articles.read(requiredId(payload, "id")));
             case "article.acknowledge" -> ok(articles.acknowledgeDraft(requiredId(payload, "id"),
                     requiredId(payload, "postId"), actorId, traceId));

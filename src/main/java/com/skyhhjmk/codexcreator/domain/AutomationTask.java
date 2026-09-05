@@ -31,6 +31,9 @@ public class AutomationTask extends PanacheEntityBase {
     @Column(name = "trace_id", nullable = false, length = 160)
     public String traceId;
 
+    @Column(name = "prompt_version", nullable = false, length = 64)
+    public String promptVersion = "1";
+
     @Column(nullable = false, length = 32)
     public String status = "QUEUED";
 

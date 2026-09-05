@@ -2,6 +2,7 @@ package com.skyhhjmk.codexcreator.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.skyhhjmk.codexcreator.domain.*;
 import com.skyhhjmk.codexcreator.provider.ProviderAdapter;
 import com.skyhhjmk.codexcreator.provider.ProviderRegistry;
@@ -17,6 +18,10 @@ import jakarta.transaction.Transactional;
 
 import java.time.OffsetDateTime;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -24,9 +29,15 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class TaskExecutionService {
+    private static final Pattern USAGE_LIMIT = Pattern.compile(
+            "(?i)(usage\\s*limit|quota\\s*(?:is\\s*)?(?:exceeded|exhausted)|billing\\s*limit)");
+    private static final Pattern RETRY_AT = Pattern.compile(
+            "(?i)try again at\\s+(\\d{1,2}):(\\d{2})\\s*(am|pm)?");
     @Inject
     ObjectMapper mapper;
 
@@ -146,7 +157,7 @@ public class TaskExecutionService {
                 ProviderAdapter adapter = providerRegistry.resolve(claimed.profile());
                 RuntimeInferenceRequest request = new RuntimeInferenceRequest(
                         claimed.operation(), claimed.profile().profileId, claimed.input(),
-                        claimed.idempotencyKey(), claimed.traceId(), "1");
+                        claimed.idempotencyKey(), claimed.traceId(), claimed.promptVersion());
                 String cacheKey = CacheKey.forTask(mapper, request.operation(), request.input(),
                         request.profileId(), request.promptVersion());
                 executeWithCacheLock(new TaskContext(claimed.taskId(), claimed.profile()), request,
@@ -190,7 +201,10 @@ public class TaskExecutionService {
             task.completedAt = OffsetDateTime.now();
             return null;
         }
-        if (task.attemptCount >= Math.max(1, runtimeConfig.maxAttempts())) {
+        // A provider-advertised usage reset is not a failed generation attempt:
+        // it is a durable wait state and may recur across several reset windows.
+        if (!"USAGE_LIMIT".equals(task.errorCode)
+                && task.attemptCount >= Math.max(1, runtimeConfig.maxAttempts())) {
             task.status = "FAILED";
             task.errorCode = "PROVIDER_ERROR";
             task.errorMessage = "maximum task attempts exhausted during recovery";
@@ -274,6 +288,12 @@ public class TaskExecutionService {
             }
 
             String message = error == null ? "provider returned no response" : rootMessage(error);
+            if (isUsageLimit(message)) {
+                Duration delay = usageLimitDelay(message, OffsetDateTime.now(), runtimeConfig.usageLimitFallbackDelay(),
+                        runtimeConfig.usageLimitRetryZone());
+                self.get().recordAttemptFailure(context.taskId(), "USAGE_LIMIT", message, delay);
+                return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
+            }
             int maxAttempts = Math.max(1, runtimeConfig.maxAttempts());
             if (attemptIndex + 1 < maxAttempts) {
                 Duration delay = retryDelay(attemptIndex);
@@ -309,7 +329,9 @@ public class TaskExecutionService {
             return false;
         }
         try {
-            return mapper.readTree(task.inputJson).equals(request.input());
+            return mapper.readTree(task.inputJson).equals(request.input())
+                    && Objects.equals(normalizePromptVersion(task.promptVersion),
+                    normalizePromptVersion(request.promptVersion()));
         } catch (Exception ignored) {
             return false;
         }
@@ -319,6 +341,37 @@ public class TaskExecutionService {
         long base = Math.min(30_000L, Math.max(0, runtimeConfig.retryDelayMillis()));
         long multiplier = 1L << Math.min(attemptIndex, 5);
         return Duration.ofMillis(Math.min(30_000L, base * multiplier));
+    }
+
+    static boolean isUsageLimit(String message) {
+        return message != null && USAGE_LIMIT.matcher(message).find();
+    }
+
+    static Duration usageLimitDelay(String message, OffsetDateTime now, Duration fallback, String retryZone) {
+        Duration safeFallback = fallback == null || fallback.isNegative() || fallback.isZero()
+                ? Duration.ofMinutes(30) : fallback;
+        if (message == null || now == null) return safeFallback;
+        Matcher matcher = RETRY_AT.matcher(message);
+        if (!matcher.find()) return safeFallback;
+        try {
+            int hour = Integer.parseInt(matcher.group(1));
+            int minute = Integer.parseInt(matcher.group(2));
+            String suffix = matcher.group(3);
+            if (suffix != null) {
+                if (hour < 1 || hour > 12) return safeFallback;
+                hour = hour % 12 + ("pm".equalsIgnoreCase(suffix) ? 12 : 0);
+            } else if (hour > 23) {
+                return safeFallback;
+            }
+            ZoneId zone = ZoneId.of(retryZone == null || retryZone.isBlank() ? "Asia/Shanghai" : retryZone);
+            LocalDateTime target = LocalDateTime.of(LocalDate.now(zone), LocalTime.of(hour, minute));
+            OffsetDateTime retryAt = target.atZone(zone).toOffsetDateTime();
+            if (!retryAt.isAfter(now)) retryAt = retryAt.plusDays(1);
+            // Leave a small margin after the provider's advertised reset time.
+            return Duration.between(now, retryAt).plusMinutes(1);
+        } catch (RuntimeException ignored) {
+            return safeFallback;
+        }
     }
 
     private static CompletableFuture<Void> delayed(Duration delay) {
@@ -340,6 +393,7 @@ public class TaskExecutionService {
         task.profile = profile;
         task.idempotencyKey = request.idempotencyKey();
         task.traceId = request.traceId();
+        task.promptVersion = normalizePromptVersion(request.promptVersion());
         task.status = "QUEUED";
         task.inputJson = json(request.input());
         task.createdAt = OffsetDateTime.now();
@@ -394,7 +448,7 @@ public class TaskExecutionService {
         if (task == null) return;
         task.status = "SUCCEEDED";
         task.outputJson = json(response.output());
-        task.usageJson = json(response.usage());
+        task.usageJson = usageJson(response.usage());
         task.provenanceJson = json(response.provenance());
         task.completedAt = OffsetDateTime.now();
         task.nextAttemptAt = null;
@@ -489,20 +543,33 @@ public class TaskExecutionService {
         catch (Exception exception) { throw new IllegalStateException("cannot serialize task JSON", exception); }
     }
 
+    private String usageJson(ProviderResponse.Usage usage) {
+        if (usage == null) return null;
+        ObjectNode value = mapper.createObjectNode();
+        value.put("inputTokens", usage.inputTokens());
+        value.put("outputTokens", usage.outputTokens());
+        value.put("totalTokens", usage.totalTokens());
+        return value.toString();
+    }
+
     private static String rootMessage(Throwable error) {
         Throwable current = error;
         while (current.getCause() != null) current = current.getCause();
         return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 
+    private static String normalizePromptVersion(String value) {
+        return value == null || value.isBlank() ? "1" : value.trim();
+    }
+
     private record TaskContext(Long taskId, ModelProfile profile) {}
 
     private RecoveryCandidate recoveryCandidate(AutomationTask task) {
         return new RecoveryCandidate(task.id, task.operation, task.profile, parse(task.inputJson),
-                task.idempotencyKey, task.traceId, task.attemptCount);
+                task.idempotencyKey, task.traceId, normalizePromptVersion(task.promptVersion), task.attemptCount);
     }
 
     private record RecoveryCandidate(Long taskId, String operation, ModelProfile profile,
-                                     JsonNode input, String idempotencyKey, String traceId,
+                                     JsonNode input, String idempotencyKey, String traceId, String promptVersion,
                                      int attemptCount) {}
 }

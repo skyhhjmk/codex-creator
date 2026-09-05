@@ -5,4 +5,6 @@
     <include file="db/changelog/001-initial-schema.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/002-topic-automation.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/003-content-tools.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/004-article-quality.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/005-model-selection.sql" relativeToChangelogFile="false"/>
 </databaseChangeLog>

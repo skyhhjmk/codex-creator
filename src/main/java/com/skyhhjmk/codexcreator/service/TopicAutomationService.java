@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceRequest;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceResponse;
 import com.skyhhjmk.codexcreator.domain.AiTopic;
+import com.skyhhjmk.codexcreator.domain.AiArticleJob;
 import com.skyhhjmk.codexcreator.domain.AutomationTask;
+import com.skyhhjmk.codexcreator.domain.ModelProfile;
 import com.skyhhjmk.codexcreator.domain.TopicAutomationSettings;
 import com.skyhhjmk.codexcreator.domain.TopicDiscoveryRun;
 import com.skyhhjmk.codexcreator.domain.TopicQuerySeed;
@@ -54,12 +56,15 @@ public class TopicAutomationService {
     AuditLogService auditLogService;
 
     @Inject
+    ModelCatalogService modelCatalog;
+
+    @Inject
     Instance<TopicAutomationService> self;
 
     @ConfigProperty(name = "codex.creator.default-profile-id", defaultValue = "codex-default")
     String defaultProfileId;
 
-    @ConfigProperty(name = "codex.creator.prompt-version", defaultValue = "1")
+    @ConfigProperty(name = "codex.creator.prompt-version", defaultValue = "2")
     String promptVersion;
 
     @Scheduled(every = "1m", identity = "codex-topic-discovery-scheduler")
@@ -153,7 +158,9 @@ public class TopicAutomationService {
                 "topic_query_seed", String.valueOf(id), traceId, Map.of());
     }
 
-    public Map<String, Object> startManual(String idempotencyKey, String traceId, String actorId) {
+    public Map<String, Object> startManual(String idempotencyKey, String traceId, String actorId,
+                                           String requestedProfileId) {
+        String profileId = modelCatalog.resolve(requestedProfileId, defaultProfileId, "topic");
         String requestKey = idempotencyKey == null || idempotencyKey.isBlank()
                 ? "manual-topic-" + UUID.randomUUID() : idempotencyKey.trim();
         TaskCacheService.LockAttempt lock = cache.acquire("topic-discovery-start", Duration.ofSeconds(90));
@@ -164,7 +171,7 @@ public class TopicAutomationService {
         try {
             StartContext context;
             try {
-                context = self.get().createManualRun(requestKey, traceId, actorId);
+                context = self.get().createManualRun(requestKey, traceId, actorId, profileId);
             } catch (RuntimeException exception) {
                 TopicDiscoveryRun winner = self.get().findRunByKey(requestKey);
                 if (winner != null) return runMap(winner);
@@ -207,8 +214,8 @@ public class TopicAutomationService {
                 ? AiTopic.<AiTopic>find("order by lastSeenAt desc, id desc")
                 : "ASSIGNED".equalsIgnoreCase(normalizedStatus)
                         ? AiTopic.<AiTopic>find(
-                                "status = ?1 or status = ?2 order by lastSeenAt desc, id desc",
-                                "WRITING", "DRAFT_CREATED")
+                                "status = ?1 or status = ?2 or status = ?3 order by lastSeenAt desc, id desc",
+                                "WRITING", "DRAFT_CREATED", "FAILED")
                         : AiTopic.<AiTopic>find(
                                 "status = ?1 order by lastSeenAt desc, id desc", normalizedStatus);
         long total = query.count();
@@ -305,7 +312,8 @@ public class TopicAutomationService {
             return null;
         }
         if (activeRun() != null) return null;
-        StartContext context = createRun(settings, "SCHEDULED", key, "topic-schedule-" + now.toEpochSecond(), "SYSTEM");
+        String profileId = modelCatalog.resolve(null, defaultProfileId, "topic");
+        StartContext context = createRun(settings, "SCHEDULED", key, "topic-schedule-" + now.toEpochSecond(), "SYSTEM", profileId);
         settings.lastRunAt = now;
         settings.nextRunAt = now.plusMinutes(settings.intervalMinutes);
         settings.lastError = null;
@@ -315,7 +323,7 @@ public class TopicAutomationService {
     }
 
     @Transactional
-    StartContext createManualRun(String key, String traceId, String actorId) {
+    StartContext createManualRun(String key, String traceId, String actorId, String profileId) {
         TopicDiscoveryRun existing = TopicDiscoveryRun.find("idempotencyKey", key).firstResult();
         if (existing != null) return null;
         TopicDiscoveryRun active = activeRun();
@@ -323,7 +331,7 @@ public class TopicAutomationService {
         TopicAutomationSettings settings = settings();
         return createRun(settings, "MANUAL", key,
                 traceId == null || traceId.isBlank() ? "topic-manual-" + UUID.randomUUID() : traceId,
-                actorId == null ? "ADMIN" : actorId);
+                actorId == null ? "ADMIN" : actorId, profileId);
     }
 
     @Transactional
@@ -332,7 +340,7 @@ public class TopicAutomationService {
     }
 
     private StartContext createRun(TopicAutomationSettings settings, String trigger,
-                                   String key, String traceId, String actorId) {
+                                   String key, String traceId, String actorId, String profileId) {
         List<TopicQuerySeed> selected = TopicQuerySeed.<TopicQuerySeed>find(
                 "enabled = true order by sortOrder asc, lastUsedAt asc, id asc")
                 .page(0, settings.maxSeedsPerRun).list();
@@ -343,8 +351,9 @@ public class TopicAutomationService {
         run.status = "QUEUED";
         run.idempotencyKey = key;
         run.traceId = traceId;
+        run.modelProfile = ModelProfile.findById(profileId);
         run.seedCount = seeds.size();
-        run.seedSnapshot = json(seeds);
+        run.seedSnapshot = seedSnapshotJson(seeds);
         run.createdAt = OffsetDateTime.now();
         run.persist();
         OffsetDateTime usedAt = run.createdAt;
@@ -354,7 +363,7 @@ public class TopicAutomationService {
         });
         auditLogService.log("SYSTEM", actorId, "topic.discovery.started", "topic_discovery_run",
                 String.valueOf(run.id), traceId, Map.of("trigger", trigger, "seedCount", seeds.size()));
-        return new StartContext(run.id, key, traceId, seeds, settings.maxTopicsPerRun);
+        return new StartContext(run.id, key, traceId, seeds, settings.maxTopicsPerRun, profileId);
     }
 
     private void launch(StartContext context) {
@@ -368,13 +377,14 @@ public class TopicAutomationService {
         ArrayNode seeds = input.putArray("seeds");
         context.seeds().forEach(seed -> {
             ObjectNode value = seeds.addObject();
+            value.put("id", seed.id());
             value.put("name", seed.name());
             value.put("query", seed.query());
             value.put("language", seed.language());
             if (seed.region() != null) value.put("region", seed.region());
         });
         RuntimeInferenceRequest request = new RuntimeInferenceRequest(
-                "topic", defaultProfileId, input, context.idempotencyKey(), context.traceId(), promptVersion);
+                "topic", context.profileId(), input, context.idempotencyKey(), context.traceId(), promptVersion);
         CompletableFuture<RuntimeInferenceResponse> future;
         try {
             future = tasks.infer(request);
@@ -401,6 +411,9 @@ public class TopicAutomationService {
             self.get().markRunFailed(runId, rootMessage(error));
             return;
         }
+        if (response != null && "RETRYING".equals(response.status())) {
+            return;
+        }
         if (response == null || !"SUCCEEDED".equals(response.status())) {
             self.get().markRunFailed(runId, response == null ? "topic task returned no response" :
                     (response.errorMessage() == null ? "topic task failed" : response.errorMessage()));
@@ -425,6 +438,11 @@ public class TopicAutomationService {
         List<SeedSnapshot> seeds = readSeeds(run.seedSnapshot);
         OffsetDateTime now = OffsetDateTime.now();
         for (AutomationPayloadValidator.TopicCandidate candidate : candidates) {
+            SeedSnapshot candidateSeed = seeds.stream()
+                    .filter(seed -> seed.id().equals(candidate.seedId()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "topic seedId is not part of this discovery run: " + candidate.seedId()));
             String key = TopicFingerprint.key(candidate.title());
             AiTopic topic = AiTopic.find("dedupeKey", key).firstResult();
             if (topic == null) topic = findLegacyFingerprintMatch(key);
@@ -445,7 +463,7 @@ public class TopicAutomationService {
             }
             topic.discoveryRun = run;
             topic.updatedAt = now;
-            topic.source = mergeSource(topic.source, candidate, seeds, response, now);
+            topic.source = mergeSource(topic.source, candidate, candidateSeed, response, now);
             topic.persist();
         }
         run.status = "SUCCEEDED";
@@ -542,6 +560,10 @@ public class TopicAutomationService {
         view.put("trigger", run.triggerType);
         view.put("status", run.status);
         view.put("taskId", run.task == null ? null : run.task.id);
+        view.put("taskStatus", run.task == null ? null : run.task.status);
+        view.put("nextAttemptAt", run.task == null ? null : run.task.nextAttemptAt);
+        view.put("profileId", run.modelProfile == null ? defaultProfileId : run.modelProfile.profileId);
+        view.put("modelId", run.modelProfile == null ? "auto" : run.modelProfile.modelId);
         view.put("traceId", run.traceId);
         view.put("seedCount", run.seedCount);
         view.put("topicCount", run.topicCount);
@@ -566,11 +588,18 @@ public class TopicAutomationService {
         view.put("reviewedAt", topic.reviewedAt);
         view.put("reviewNote", topic.reviewNote == null ? "" : topic.reviewNote);
         view.put("updatedAt", topic.updatedAt);
+        AiArticleJob job = AiArticleJob.find("topic.id = ?1 order by updatedAt desc, id desc", topic.id).firstResult();
+        if (job != null) {
+            view.put("articleJobId", job.id);
+            view.put("articleJobStatus", job.status);
+            view.put("articleError", job.errorMessage == null ? "" : job.errorMessage);
+            view.put("articleNextAttemptAt", job.task == null ? null : job.task.nextAttemptAt);
+        }
         return view;
     }
 
     private String mergeSource(String existing, AutomationPayloadValidator.TopicCandidate candidate,
-                               List<SeedSnapshot> seeds, RuntimeInferenceResponse response,
+                               SeedSnapshot seed, RuntimeInferenceResponse response,
                                OffsetDateTime now) {
         ObjectNode source = parse(existing).isObject()
                 ? (ObjectNode) parse(existing) : mapper.createObjectNode();
@@ -590,9 +619,18 @@ public class TopicAutomationService {
         ArrayNode queries = source.withArray("queries");
         Set<String> existingQueries = new LinkedHashSet<>();
         queries.forEach(value -> existingQueries.add(value.asText()));
-        seeds.forEach(seed -> {
-            if (existingQueries.add(seed.query())) queries.add(seed.query());
-        });
+        if (existingQueries.add(seed.query())) queries.add(seed.query());
+        ObjectNode primarySeed = source.putObject("primarySeed");
+        writeSeed(primarySeed, seed);
+        ArrayNode associatedSeeds = source.withArray("seeds");
+        boolean knownSeed = false;
+        for (JsonNode value : associatedSeeds) {
+            if (value.path("id").asLong(-1) == seed.id()) {
+                knownSeed = true;
+                break;
+            }
+        }
+        if (!knownSeed) writeSeed(associatedSeeds.addObject(), seed);
         if (response.taskId() != null) source.put("taskId", response.taskId());
         if (response.traceId() != null) source.put("traceId", response.traceId());
         source.put("discoveredAt", now.toString());
@@ -628,14 +666,29 @@ public class TopicAutomationService {
 
     private String topicPrompt(List<SeedSnapshot> seeds, int maxTopics) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("You are WindBlog's topic research scout. Use the built-in web search across the public web. ");
-        prompt.append("Search each supplied seed, open authoritative pages when useful, and propose at most ")
-                .append(maxTopics).append(" original article topics. ");
-        prompt.append("Do not use shell, files, arbitrary tools, or reproduce source pages. ");
-        prompt.append("Return only JSON matching the requested schema. Every topic needs public source URLs, a concise rationale, keywords, and one recommendation from WRITE, MONITOR, IGNORE. Seeds: ");
-        seeds.forEach(seed -> prompt.append('[').append(seed.name()).append(" | ").append(seed.query()).append(" | ")
+        prompt.append("You are WindBlog's evidence-led topic editor. Use built-in web search to investigate each seed, open primary or authoritative pages, and cross-check current claims. ");
+        prompt.append("Propose at most ").append(maxTopics).append(" non-duplicative article topics with a specific tension, question, or decision—not a generic trend summary. ");
+        prompt.append("A WRITE topic must support an original editorial angle, identify who benefits, explain why it matters now, and have enough evidence for a substantive article. Use MONITOR when evidence or timeliness is weak and IGNORE for promotional, duplicated, or low-value ideas. ");
+        prompt.append("Each rationale must state the proposed thesis direction, reader value, strongest uncertainty or counterpoint, and why the cited sources are sufficient. Every topic needs at least two independent public sources; prefer primary sources and direct reporting. ");
+        prompt.append("Assign every topic to exactly one supplied seed by returning its numeric seedId. The seedId must be copied from the matching seed and must never be invented. ");
+        prompt.append("Do not use shell, files, arbitrary tools, reproduce source pages, or invent facts or URLs. Return only JSON matching the schema with seedId, title, rationale, keywords, recommendation, and sources. Seeds: ");
+        seeds.forEach(seed -> prompt.append('[').append(seed.id()).append(" | ").append(seed.name()).append(" | ").append(seed.query()).append(" | ")
                 .append(seed.language()).append(seed.region() == null ? "" : " | " + seed.region()).append("] "));
         return prompt.toString();
+    }
+
+    String seedSnapshotJson(List<SeedSnapshot> seeds) {
+        ArrayNode values = mapper.createArrayNode();
+        seeds.forEach(seed -> writeSeed(values.addObject(), seed));
+        return values.toString();
+    }
+
+    private static void writeSeed(ObjectNode value, SeedSnapshot seed) {
+        value.put("id", seed.id());
+        value.put("name", seed.name());
+        value.put("query", seed.query());
+        value.put("language", seed.language());
+        if (seed.region() != null) value.put("region", seed.region());
     }
 
     private List<SeedSnapshot> readSeeds(String value) {
@@ -716,7 +769,7 @@ public class TopicAutomationService {
     }
 
     record StartContext(Long runId, String idempotencyKey, String traceId,
-                        List<SeedSnapshot> seeds, int maxTopics) {
+                        List<SeedSnapshot> seeds, int maxTopics, String profileId) {
     }
 
     record SeedSnapshot(Long id, String name, String query, String language, String region) {

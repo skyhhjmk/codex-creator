@@ -10,6 +10,7 @@ import com.skyhhjmk.codexcreator.runtime.CodexAppServerSupervisor;
 import com.skyhhjmk.codexcreator.service.CodexRuntimePersistence;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -27,6 +28,12 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
     @Inject
     CodexRuntimePersistence persistence;
 
+    @ConfigProperty(name = "codex.creator.article.reasoning-effort", defaultValue = "high")
+    String articleReasoningEffort;
+
+    @ConfigProperty(name = "codex.creator.topic.reasoning-effort", defaultValue = "medium")
+    String topicReasoningEffort;
+
     @Override
     public boolean supports(String providerType) {
         return "CODEX_APP_SERVER".equalsIgnoreCase(providerType);
@@ -35,6 +42,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
     @Override
     public CompletableFuture<ProviderResponse> infer(ProviderRequest request) {
         ModelProfile profile = request.profile();
+        String reasoningEffort = effectiveReasoningEffort(request.operation(), profile);
         ObjectNode threadParams = mapper.createObjectNode();
         if (profile.modelId != null && !profile.modelId.isBlank() && !"auto".equalsIgnoreCase(profile.modelId)) {
             threadParams.put("model", profile.modelId);
@@ -49,6 +57,8 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                     ObjectNode turnParams = mapper.createObjectNode();
                     turnParams.put("threadId", threadId);
                     turnParams.put("approvalPolicy", "never");
+                    turnParams.put("effort", reasoningEffort);
+                    turnParams.put("personality", "pragmatic");
                     ObjectNode sandboxPolicy = turnParams.putObject("sandboxPolicy");
                     sandboxPolicy.put("type", "readOnly");
                     sandboxPolicy.put("networkAccess", true);
@@ -67,7 +77,8 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                                 return supervisor.awaitTurnCompletion(threadId, turnId)
                                         .thenApply(completed -> {
                                             persistence.turnCompleted(turnId, completed.completed());
-                                            return response(completed, request.operation(), threadId, turnId);
+                                            return response(completed, request.operation(), reasoningEffort,
+                                                    threadId, turnId);
                                         })
                                         .whenComplete((ignored, error) -> {
                                             if (error != null) persistence.turnFailed(turnId, error);
@@ -76,7 +87,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                 });
     }
 
-    private ProviderResponse response(AppServerTurnResult turnResult, String operation,
+    private ProviderResponse response(AppServerTurnResult turnResult, String operation, String reasoningEffort,
                                       String threadId, String turnId) {
         JsonNode completed = turnResult.completed();
         JsonNode turn = completed.path("turn");
@@ -94,6 +105,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
         provenance.put("turnId", turnId);
         provenance.put("experimentalApi", false);
         provenance.put("operation", operation);
+        provenance.put("reasoningEffort", reasoningEffort);
         provenance.put("webSearchItems", webSearchEvidence(turnResult, threadId, turnId));
         return new ProviderResponse(output, ProviderResponse.Usage.empty(), provenance, null, threadId, turnId);
     }
@@ -157,6 +169,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
             ObjectNode topic = topics.putObject("items");
             topic.put("type", "object");
             ObjectNode topicProperties = topic.putObject("properties");
+            topicProperties.putObject("seedId").put("type", "integer").put("minimum", 1);
             topicProperties.putObject("title").put("type", "string").put("maxLength", 160);
             topicProperties.putObject("rationale").put("type", "string").put("maxLength", 2_000);
             ObjectNode keywords = topicProperties.putObject("keywords");
@@ -166,13 +179,14 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
             ObjectNode sources = topicProperties.putObject("sources");
             sources.put("type", "array").put("maxItems", 20);
             sourceSchema(sources.putObject("items"));
-            topic.putArray("required").add("title").add("rationale").add("keywords")
+            topic.putArray("required").add("seedId").add("title").add("rationale").add("keywords")
                     .add("recommendation").add("sources");
             topic.put("additionalProperties", false);
             schema.putArray("required").add("topics");
         } else if ("article".equalsIgnoreCase(operation)) {
             properties.putObject("title").put("type", "string").put("maxLength", 160);
             properties.putObject("summary").put("type", "string").put("maxLength", 2_000);
+            properties.putObject("editorialThesis").put("type", "string").put("maxLength", 1_000);
             ObjectNode categoryId = properties.putObject("categoryId");
             categoryId.putArray("type").add("integer").add("null");
             categoryId.put("minimum", 1);
@@ -180,7 +194,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
             ObjectNode sources = properties.putObject("sources");
             sources.put("type", "array").put("maxItems", 20);
             sourceSchema(sources.putObject("items"));
-            schema.putArray("required").add("title").add("summary").add("categoryId")
+            schema.putArray("required").add("title").add("summary").add("editorialThesis").add("categoryId")
                     .add("contentMarkdown").add("sources");
         } else {
             return mapper.createObjectNode();
@@ -196,6 +210,12 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
         properties.putObject("title").put("type", "string").put("maxLength", 500);
         source.putArray("required").add("url").add("title");
         source.put("additionalProperties", false);
+    }
+
+    private String effectiveReasoningEffort(String operation, ModelProfile profile) {
+        String configured = "article".equalsIgnoreCase(operation) ? articleReasoningEffort
+                : "topic".equalsIgnoreCase(operation) ? topicReasoningEffort : profile.reasoningEffort;
+        return configured == null || configured.isBlank() ? "medium" : configured.trim().toLowerCase();
     }
 
     private static boolean isFailedTurn(JsonNode turn) {

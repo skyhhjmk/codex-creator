@@ -32,6 +32,10 @@ public class TopicDiscoveryRun extends PanacheEntityBase {
     @JoinColumn(name = "task_id")
     public AutomationTask task;
 
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "model_profile_id")
+    public ModelProfile modelProfile;
+
     @Column(name = "idempotency_key", nullable = false, unique = true, length = 256)
     public String idempotencyKey;
 

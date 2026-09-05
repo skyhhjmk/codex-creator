@@ -30,6 +30,10 @@ public class AiArticleJob extends PanacheEntityBase {
     @JoinColumn(name = "task_id")
     public AutomationTask task;
 
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "model_profile_id")
+    public ModelProfile modelProfile;
+
     @Column(name = "request_key", nullable = false, unique = true, length = 256)
     public String requestKey;
 
@@ -65,6 +69,16 @@ public class AiArticleJob extends PanacheEntityBase {
 
     @Column(name = "error_message", columnDefinition = "text")
     public String errorMessage;
+
+    @Column(name = "generation_attempt", nullable = false)
+    public int generationAttempt = 1;
+
+    @Column(name = "quality_attempt", nullable = false)
+    public int qualityAttempt = 1;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "quality_report", columnDefinition = "jsonb")
+    public String qualityReport;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     public OffsetDateTime createdAt;

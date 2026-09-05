@@ -206,7 +206,8 @@ public class AdminResource {
     @Path("/topic-runs")
     public Map<String, Object> startTopicRun(Map<String, Object> payload) {
         String key = payload == null ? "" : value(payload.get("idempotencyKey"));
-        return topicAutomation.startManual(key, java.util.UUID.randomUUID().toString(), "CODEX_ADMIN");
+        String profileId = payload == null ? "" : value(payload.get("profileId"));
+        return topicAutomation.startManual(key, java.util.UUID.randomUUID().toString(), "CODEX_ADMIN", profileId);
     }
 
     @GET
