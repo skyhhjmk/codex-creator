@@ -2,6 +2,7 @@ package com.skyhhjmk.codexcreator.service;
 
 import com.skyhhjmk.codexcreator.domain.TestServer;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.NotFoundException;
@@ -22,8 +23,8 @@ import java.util.*;
 /** Stores SSH credentials encrypted at rest; views deliberately never contain private keys. */
 @ApplicationScoped
 public class TestServerService {
-    private static final SecureRandom RANDOM = new SecureRandom();
     @ConfigProperty(name = "codex.creator.test-server.encryption-secret", defaultValue = "") String encryptionSecret;
+    @Inject ArticleEvidenceService articleEvidence;
 
     public List<Map<String,Object>> list() { return TestServer.<TestServer>list("order by name").stream().map(this::view).toList(); }
     public Map<String,Object> setupGuide() { return Map.of("system", "Ubuntu 22.04 LTS 或 Debian 12", "steps", List.of(
@@ -63,15 +64,22 @@ public class TestServerService {
                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new",
                     server.sshUser + "@" + server.host, command).redirectErrorStream(true).start();
             boolean completed = process.waitFor(90, TimeUnit.SECONDS);
-            if (!completed) { process.destroyForcibly(); return Map.of("ok", false, "exitCode", -1, "output", "SSH command timed out after 90 seconds"); }
+            if (!completed) {
+                process.destroyForcibly();
+                String output = "SSH command timed out after 90 seconds";
+                articleEvidence.recordVerification(articleJobId, serverId, command, -1, output);
+                return Map.of("ok", false, "exitCode", -1, "output", output);
+            }
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            if (output.length() > 12_000) output = output.substring(0, 12_000) + "\n[output truncated]";
-            return Map.of("ok", process.exitValue() == 0, "exitCode", process.exitValue(), "output", output);
+            output = ArticleEvidenceService.sanitize(output, 2_000);
+            int exitCode = process.exitValue();
+            articleEvidence.recordVerification(articleJobId, serverId, command, exitCode, output);
+            return Map.of("ok", exitCode == 0, "exitCode", exitCode, "output", output);
         } catch (Exception exception) { throw new BadRequestException("SSH verification failed: " + exception.getMessage(), exception); }
         finally { if (keyFile != null) try { Files.deleteIfExists(keyFile); } catch (Exception ignored) { } }
     }
     public Map<String,Object> view(TestServer s){return Map.of("id",s.id,"name",s.name,"host",s.host,"sshPort",s.sshPort,"sshUser",s.sshUser,"enabled",s.enabled,"privateKeyConfigured",s.privateKeyEncrypted!=null&&!s.privateKeyEncrypted.isBlank());}
-    private String encrypt(String clear){try{byte[] iv=new byte[12];RANDOM.nextBytes(iv);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key(),new GCMParameterSpec(128,iv));return Base64.getEncoder().encodeToString(iv)+":"+Base64.getEncoder().encodeToString(c.doFinal(clear.getBytes(StandardCharsets.UTF_8)));}catch(Exception e){throw new BadRequestException("cannot protect test-server private key",e);}}
+    private String encrypt(String clear){try{byte[] iv=new byte[12];new SecureRandom().nextBytes(iv);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key(),new GCMParameterSpec(128,iv));return Base64.getEncoder().encodeToString(iv)+":"+Base64.getEncoder().encodeToString(c.doFinal(clear.getBytes(StandardCharsets.UTF_8)));}catch(Exception e){throw new BadRequestException("cannot protect test-server private key",e);}}
     private String decrypt(String value){try{String[] p=value.split(":",2);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,Base64.getDecoder().decode(p[0])));return new String(c.doFinal(Base64.getDecoder().decode(p[1])),StandardCharsets.UTF_8);}catch(Exception e){throw new IllegalStateException("cannot decrypt test-server private key",e);}}
     private SecretKeySpec key(){if(encryptionSecret==null||encryptionSecret.isBlank())throw new BadRequestException("CODEx Creator test-server encryption secret is not configured");try{return new SecretKeySpec(MessageDigest.getInstance("SHA-256").digest(encryptionSecret.getBytes(StandardCharsets.UTF_8)),"AES");}catch(Exception e){throw new IllegalStateException(e);}}
     private static String text(Map<String,Object> m,String n){return m==null||m.get(n)==null?"":String.valueOf(m.get(n)).trim();} private static String optional(Map<String,Object>m,String n,String d){String v=text(m,n);return v.isBlank()?d:v;} private static int integer(Map<String,Object>m,String n,int d){try{return m!=null&&m.get(n)!=null?Integer.parseInt(String.valueOf(m.get(n))):d;}catch(Exception e){throw new BadRequestException("invalid "+n);}} private static boolean bool(Map<String,Object>m,String n,boolean d){return m==null||m.get(n)==null?d:Boolean.parseBoolean(String.valueOf(m.get(n)));}

@@ -10,4 +10,5 @@
     <include file="db/changelog/006-test-servers.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/007-content-promotion.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/008-turn-progress.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/009-article-job-evidence.sql" relativeToChangelogFile="false"/>
 </databaseChangeLog>

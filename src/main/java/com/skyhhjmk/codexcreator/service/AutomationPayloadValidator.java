@@ -2,6 +2,7 @@ package com.skyhhjmk.codexcreator.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.skyhhjmk.codexcreator.domain.ArticleJobEvidence;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -33,6 +34,10 @@ public class AutomationPayloadValidator {
     private static final Pattern H2 = Pattern.compile("(?m)^##\\s+\\S");
     private static final Pattern REFERENCE_HEADING = Pattern.compile(
             "(?im)^#{2,6}\\s+(参考(?:资料|来源|文献)?|资料来源|引用来源|references|sources)\\s*$");
+    private static final Pattern MARKDOWN_IMAGE = Pattern.compile("(?m)^!\\[([^\\]]+)\\]\\(([^\\s)]+)(?:\\s+\\\"[^\\\"]*\\\")?\\)\\s*$");
+    private static final Pattern CAPTION = Pattern.compile("^[_*][^\\n]+[_*]$");
+    private static final Pattern NATURAL_VERIFICATION = Pattern.compile("(?s)(执行.{0,120}(出现如下信息|即为正常|结果如下)|出现如下信息即为正常)");
+    private static final Pattern CODE_FENCE = Pattern.compile("(?s)```[^\\n]*\\n(.*?)```");
     private static final List<String> GENERIC_AI_PHRASES = List.of(
             "在当今快速发展的时代", "在这个日新月异的时代", "随着科技的不断发展", "随着技术的不断发展",
             "在数字化浪潮中", "让我们一起", "本文将深入探讨", "本文旨在", "不难发现",
@@ -87,6 +92,17 @@ public class AutomationPayloadValidator {
     }
 
     public ArticleDraft article(JsonNode output, JsonNode provenance, String language) {
+        return article(output, provenance, language, List.of(), false, false);
+    }
+
+    public ArticleDraft article(JsonNode output, JsonNode provenance, String language,
+                                List<ArticleJobEvidence> evidence, boolean practicalVerification) {
+        return article(output, provenance, language, evidence, practicalVerification, true);
+    }
+
+    public ArticleDraft article(JsonNode output, JsonNode provenance, String language,
+                                List<ArticleJobEvidence> evidence, boolean practicalVerification,
+                                boolean enforceEvidence) {
         JsonNode root = object(output, "article output must be a JSON object");
         String title = requiredText(root, "title", MAX_TITLE_LENGTH);
         String summary = optionalText(root, "summary", MAX_RATIONALE_LENGTH);
@@ -97,14 +113,16 @@ public class AutomationPayloadValidator {
         }
         List<Source> sources = sources(root.get("sources"));
         Long categoryId = optionalPositiveLong(root, "categoryId");
-        QualityReport quality = inspectArticle(
-                title, summary, contentMarkdown, editorialThesis, sources, provenance, language);
+        QualityReport quality = inspectArticle(title, summary, contentMarkdown, editorialThesis, sources,
+                provenance, language, evidence, practicalVerification, enforceEvidence);
         if (!quality.passed()) throw new ArticleQualityException(quality);
         return new ArticleDraft(title, summary, contentMarkdown, editorialThesis, sources, categoryId, quality);
     }
 
     private QualityReport inspectArticle(String title, String summary, String markdown, String thesis,
-                                         List<Source> sources, JsonNode provenance, String language) {
+                                         List<Source> sources, JsonNode provenance, String language,
+                                         List<ArticleJobEvidence> evidence, boolean practicalVerification,
+                                         boolean enforceEvidence) {
         List<String> issues = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         boolean cjkArticle = language != null && language.toLowerCase(Locale.ROOT).startsWith("zh");
@@ -116,6 +134,9 @@ public class AutomationPayloadValidator {
         int paragraphs = substantiveParagraphs(markdown);
         int overlongParagraphs = overlongParagraphs(markdown, cjkArticle);
         int tableCount = validateTables(markdown, issues);
+        List<ArticleJobEvidence> safeEvidence = evidence == null ? List.of() : evidence;
+        int imageCount = validateImages(markdown, safeEvidence, enforceEvidence, issues);
+        int verifiedCommands = validatePracticalEvidence(markdown, safeEvidence, practicalVerification, issues);
 
         if (cjkArticle ? cjkCharacters < minCjkCharacters : words < minWords) {
             issues.add(cjkArticle
@@ -177,8 +198,72 @@ public class AutomationPayloadValidator {
         metrics.put("sources", sources.size());
         metrics.put("citedSources", citedSources);
         metrics.put("tables", tableCount);
+        metrics.put("images", imageCount);
+        metrics.put("verifiedCommands", verifiedCommands);
         return new QualityReport(issues.isEmpty(), score, Map.copyOf(metrics),
                 List.copyOf(issues), List.copyOf(warnings));
+    }
+
+    private int validateImages(String markdown, List<ArticleJobEvidence> evidence, boolean required,
+                               List<String> issues) {
+        Set<String> uploadedUrls = evidence.stream().filter(item -> "IMAGE".equals(item.kind))
+                .map(item -> item.mediaUrl == null ? "" : item.mediaUrl.trim()).filter(url -> !url.isBlank())
+                .collect(java.util.stream.Collectors.toSet());
+        Matcher matcher = MARKDOWN_IMAGE.matcher(markdown);
+        String[] lines = markdown.split("\\R", -1);
+        int images = 0;
+        while (matcher.find()) {
+            images++;
+            if (matcher.group(1).trim().length() < 4) issues.add("图片缺少描述性 alt 文本");
+            String url = matcher.group(2).trim();
+            if (required && !uploadedUrls.contains(url)) issues.add("图片必须引用本次任务上传的 WindBlog 图片：" + url);
+            int line = lineNumber(markdown, matcher.start());
+            int previous = line - 2;
+            while (previous >= 0 && lines[previous].isBlank()) previous--;
+            if (previous < 0 || lines[previous].trim().startsWith("#")) issues.add("图片必须紧随其说明段落");
+            if (line >= lines.length || !CAPTION.matcher(lines[line].trim()).matches()) {
+                issues.add("每张图片后必须紧跟一行斜体图注");
+            }
+        }
+        if (required && images < 2) issues.add("正文至少需要两张与段落内容相关的已上传图片，当前为 " + images);
+        return images;
+    }
+
+    private int validatePracticalEvidence(String markdown, List<ArticleJobEvidence> evidence,
+                                          boolean practicalVerification, List<String> issues) {
+        if (!practicalVerification) return 0;
+        List<ArticleJobEvidence> successful = evidence.stream()
+                .filter(item -> "VERIFICATION".equals(item.kind) && item.exitCode != null && item.exitCode == 0)
+                .toList();
+        if (successful.isEmpty()) {
+            issues.add("已启用实操验证，但本次生成没有成功的验证命令记录");
+            return 0;
+        }
+        if (!NATURAL_VERIFICATION.matcher(markdown).find()) {
+            issues.add("实操证据必须以自然说明“执行…后，出现如下信息即为正常”等形式引入");
+        }
+        boolean outputEmbedded = successful.stream().anyMatch(item -> outputExcerpt(item.output)
+                .map(excerpt -> codeFenceContains(markdown, excerpt)).orElse(false));
+        if (!outputEmbedded) issues.add("正文必须包含至少一段与成功验证记录匹配的脱敏命令输出代码块");
+        return successful.size();
+    }
+
+    private static java.util.Optional<String> outputExcerpt(String output) {
+        if (output == null) return java.util.Optional.empty();
+        return java.util.Arrays.stream(output.split("\\R")).map(String::trim)
+                .filter(line -> line.length() >= 8).findFirst();
+    }
+
+    private static boolean codeFenceContains(String markdown, String excerpt) {
+        Matcher matcher = CODE_FENCE.matcher(markdown);
+        while (matcher.find()) if (matcher.group(1).contains(excerpt)) return true;
+        return false;
+    }
+
+    private static int lineNumber(String value, int offset) {
+        int line = 1;
+        for (int index = 0; index < offset; index++) if (value.charAt(index) == '\n') line++;
+        return line;
     }
 
     private int validateTables(String markdown, List<String> issues) {

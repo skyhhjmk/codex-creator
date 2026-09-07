@@ -3,6 +3,7 @@ package com.skyhhjmk.codexcreator.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.skyhhjmk.codexcreator.domain.ArticleJobEvidence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -147,6 +148,83 @@ class AutomationPayloadValidatorTest {
                                         + "\"contentMarkdown\":\"<!doctype html><html><body>page</body></html>\","
                                         + "\"sources\":[\"https://example.com\",\"https://second.example\"]}"),
                         mapper.createObjectNode()));
+    }
+
+    @Test
+    void requiresTwoBoundImagesForArticleJobs() {
+        String first = "https://windblog.example/uploads/lead.png";
+        String second = "https://windblog.example/uploads/diagram.png";
+        String markdown = withImages(goodMarkdown(), first, second);
+
+        AutomationPayloadValidator.ArticleDraft draft = validator.article(goodArticle(markdown), searchProvenance(),
+                "zh-CN", List.of(image(first), image(second)), false);
+
+        assertTrue(draft.qualityReport().passed());
+        assertEquals(2, draft.qualityReport().metrics().get("images"));
+
+        AutomationPayloadValidator.ArticleQualityException error = assertThrows(
+                AutomationPayloadValidator.ArticleQualityException.class,
+                () -> validator.article(goodArticle(markdown), searchProvenance(), "zh-CN", List.of(image(first)), false));
+        assertTrue(error.report().issues().stream().anyMatch(issue -> issue.contains("本次任务上传")));
+    }
+
+    @Test
+    void requiresNaturalEmbeddedPracticalEvidence() {
+        String first = "https://windblog.example/uploads/lead.png";
+        String second = "https://windblog.example/uploads/diagram.png";
+        String markdown = withImages(goodMarkdown(), first, second).replace("## 可执行取舍", """
+                执行 `nginx -v` 后，出现如下信息即为正常：
+
+                ```text
+                nginx version: nginx/1.24.0
+                ```
+
+                ## 可执行取舍""");
+        List<ArticleJobEvidence> evidence = List.of(image(first), image(second), verification(
+                "nginx -v", 0, "nginx version: nginx/1.24.0\nbuilt with OpenSSL"));
+
+        assertTrue(validator.article(goodArticle(markdown), searchProvenance(), "zh-CN", evidence, true)
+                .qualityReport().passed());
+
+        AutomationPayloadValidator.ArticleQualityException error = assertThrows(
+                AutomationPayloadValidator.ArticleQualityException.class,
+                () -> validator.article(goodArticle(withImages(goodMarkdown(), first, second)), searchProvenance(),
+                        "zh-CN", evidence, true));
+        assertTrue(error.report().issues().stream().anyMatch(issue -> issue.contains("实操证据")));
+    }
+
+    private ArticleJobEvidence image(String url) {
+        ArticleJobEvidence evidence = new ArticleJobEvidence();
+        evidence.kind = "IMAGE";
+        evidence.mediaUrl = url;
+        return evidence;
+    }
+
+    private ArticleJobEvidence verification(String command, int exitCode, String output) {
+        ArticleJobEvidence evidence = new ArticleJobEvidence();
+        evidence.kind = "VERIFICATION";
+        evidence.command = command;
+        evidence.exitCode = exitCode;
+        evidence.output = output;
+        return evidence;
+    }
+
+    private String withImages(String markdown, String first, String second) {
+        return markdown.replace(
+                "开头先给出证据边界与核心判断，避免用空洞背景铺垫正文。这里继续补充足够具体的上下文、对象和限制条件，让段落真正承担论证作用。",
+                """
+                开头先给出证据边界与核心判断，避免用空洞背景铺垫正文。这里继续补充足够具体的上下文、对象和限制条件，让段落真正承担论证作用。
+
+                ![展示核心结论的流程关系图](%s)
+                *图：开篇结论与关键约束的关系。*
+                """.formatted(first)).replace(
+                "第二份资料从另一个角度给出限制条件，作者据此区分事实、推断和判断。[第二份报告](https://second.example/report) 用于交叉核对关键结论。",
+                """
+                第二份资料从另一个角度给出限制条件，作者据此区分事实、推断和判断。[第二份报告](https://second.example/report) 用于交叉核对关键结论。
+
+                ![比较不同验证步骤的结构示意图](%s)
+                *图：关键验证步骤的先后关系。*
+                """.formatted(second));
     }
 
     private ObjectNode goodArticle(String markdown) {
