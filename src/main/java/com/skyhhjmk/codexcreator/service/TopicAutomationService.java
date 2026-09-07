@@ -87,17 +87,34 @@ public class TopicAutomationService {
     }
 
     @Transactional
+    public Promotion promotion() {
+        TopicAutomationSettings settings = settings();
+        return new Promotion(settings.promotionEnabled,
+                settings.promotionMarkdown == null ? "" : settings.promotionMarkdown);
+    }
+
+    @Transactional
     public Map<String, Object> updateSettings(JsonNode payload, String actorId, String traceId) {
         TopicAutomationSettings settings = settings();
         boolean enabled = booleanValue(payload, "enabled", settings.enabled);
         int interval = intValue(payload, "intervalMinutes", settings.intervalMinutes);
         int maxSeeds = intValue(payload, "maxSeedsPerRun", settings.maxSeedsPerRun);
         int maxTopics = intValue(payload, "maxTopicsPerRun", settings.maxTopicsPerRun);
+        boolean promotionEnabled = booleanValue(payload, "promotionEnabled", settings.promotionEnabled);
+        String promotionMarkdown = nullableText(payload, "promotionMarkdown", settings.promotionMarkdown);
         validateSettings(interval, maxSeeds, maxTopics);
+        if (promotionMarkdown != null && promotionMarkdown.length() > 8_000) {
+            throw new IllegalArgumentException("promotionMarkdown must be at most 8000 characters");
+        }
+        if (promotionEnabled && (promotionMarkdown == null || promotionMarkdown.isBlank())) {
+            throw new IllegalArgumentException("promotionMarkdown is required when promotion is enabled");
+        }
         settings.enabled = enabled;
         settings.intervalMinutes = interval;
         settings.maxSeedsPerRun = maxSeeds;
         settings.maxTopicsPerRun = maxTopics;
+        settings.promotionEnabled = promotionEnabled;
+        settings.promotionMarkdown = promotionMarkdown == null || promotionMarkdown.isBlank() ? null : promotionMarkdown.trim();
         settings.nextRunAt = enabled ? OffsetDateTime.now().plusMinutes(interval) : null;
         settings.lastError = null;
         settings.updatedAt = OffsetDateTime.now();
@@ -105,7 +122,9 @@ public class TopicAutomationService {
         auditLogService.log("WINDBLOG_ADMIN", actorId, "topic.settings.updated",
                 "topic_automation_settings", "1", traceId, Map.of(
                         "enabled", enabled, "intervalMinutes", interval,
-                        "maxSeedsPerRun", maxSeeds, "maxTopicsPerRun", maxTopics));
+                        "maxSeedsPerRun", maxSeeds, "maxTopicsPerRun", maxTopics,
+                        "promotionEnabled", promotionEnabled,
+                        "promotionConfigured", settings.promotionMarkdown != null));
         return settingsMap(settings);
     }
 
@@ -535,6 +554,8 @@ public class TopicAutomationService {
         view.put("lastRunAt", settings.lastRunAt);
         view.put("lastSuccessAt", settings.lastSuccessAt);
         view.put("lastError", settings.lastError == null ? "" : settings.lastError);
+        view.put("promotionEnabled", settings.promotionEnabled);
+        view.put("promotionMarkdown", settings.promotionMarkdown == null ? "" : settings.promotionMarkdown);
         view.put("updatedAt", settings.updatedAt);
         return view;
     }
@@ -561,6 +582,7 @@ public class TopicAutomationService {
         view.put("status", run.status);
         view.put("taskId", run.task == null ? null : run.task.id);
         view.put("taskStatus", run.task == null ? null : run.task.status);
+        view.put("execution", run.task == null ? Map.of() : tasks.executionView(run.task.id));
         view.put("nextAttemptAt", run.task == null ? null : run.task.nextAttemptAt);
         view.put("profileId", run.modelProfile == null ? defaultProfileId : run.modelProfile.profileId);
         view.put("modelId", run.modelProfile == null ? "auto" : run.modelProfile.modelId);
@@ -594,6 +616,7 @@ public class TopicAutomationService {
             view.put("articleJobStatus", job.status);
             view.put("articleError", job.errorMessage == null ? "" : job.errorMessage);
             view.put("articleNextAttemptAt", job.task == null ? null : job.task.nextAttemptAt);
+            view.put("execution", job.task == null ? Map.of() : tasks.executionView(job.task.id));
         }
         return view;
     }
@@ -669,6 +692,7 @@ public class TopicAutomationService {
         prompt.append("You are WindBlog's evidence-led topic editor. Use built-in web search to investigate each seed, open primary or authoritative pages, and cross-check current claims. ");
         prompt.append("Propose at most ").append(maxTopics).append(" non-duplicative article topics with a specific tension, question, or decision—not a generic trend summary. ");
         prompt.append("A WRITE topic must support an original editorial angle, identify who benefits, explain why it matters now, and have enough evidence for a substantive article. Use MONITOR when evidence or timeliness is weak and IGNORE for promotional, duplicated, or low-value ideas. ");
+        prompt.append("Source-quality gate: before treating a search result as evidence, inspect the page and exclude pure commercial landing pages, affiliate/deal/coupon/lead-generation pages, press-release syndication without independent reporting, SEO content farms, scraped or spun copies, AI-generated filler, and self-asked/self-answered pages whose only purpose is to funnel readers to a product or service. Do not turn such pages into topics and do not cite them. A page merely mentioning a company is not automatically disqualified: retain it only when it contributes verifiable, material facts and pair it with independent or primary evidence. ");
         prompt.append("Each rationale must state the proposed thesis direction, reader value, strongest uncertainty or counterpoint, and why the cited sources are sufficient. Every topic needs at least two independent public sources; prefer primary sources and direct reporting. ");
         prompt.append("Assign every topic to exactly one supplied seed by returning its numeric seedId. The seedId must be copied from the matching seed and must never be invented. ");
         prompt.append("Do not use shell, files, arbitrary tools, reproduce source pages, or invent facts or URLs. Return only JSON matching the schema with seedId, title, rationale, keywords, recommendation, and sources. Seeds: ");
@@ -770,6 +794,9 @@ public class TopicAutomationService {
 
     record StartContext(Long runId, String idempotencyKey, String traceId,
                         List<SeedSnapshot> seeds, int maxTopics, String profileId) {
+    }
+
+    public record Promotion(boolean enabled, String markdown) {
     }
 
     record SeedSnapshot(Long id, String name, String query, String language, String region) {

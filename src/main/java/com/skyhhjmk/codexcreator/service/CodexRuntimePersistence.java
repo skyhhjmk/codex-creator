@@ -2,6 +2,8 @@ package com.skyhhjmk.codexcreator.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.skyhhjmk.codexcreator.domain.AutomationTask;
 import com.skyhhjmk.codexcreator.domain.CodexThread;
 import com.skyhhjmk.codexcreator.domain.CodexTurn;
@@ -49,6 +51,7 @@ public class CodexRuntimePersistence {
         turn.externalTurnId = externalTurnId;
         turn.status = "RUNNING";
         turn.inputJson = json(input);
+        turn.progressJson = progress("TURN_STARTED", "已向 Codex 提交生成请求", null).toString();
         turn.startedAt = OffsetDateTime.now();
         turn.persist();
     }
@@ -57,6 +60,7 @@ public class CodexRuntimePersistence {
     public void turnCompleted(String externalTurnId, JsonNode output) {
         CodexTurn turn = CodexTurn.find("externalTurnId", externalTurnId).firstResult();
         if (turn == null) return;
+        appendProgress(turn, "TURN_COMPLETED", "Codex 已返回生成结果", null);
         turn.status = "SUCCEEDED";
         turn.outputJson = json(output);
         turn.completedAt = OffsetDateTime.now();
@@ -71,8 +75,42 @@ public class CodexRuntimePersistence {
         CodexTurn turn = CodexTurn.find("externalTurnId", externalTurnId).firstResult();
         if (turn == null) return;
         turn.status = "FAILED";
+        appendProgress(turn, "TURN_FAILED", message(error), null);
         turn.errorJson = json(mapper.getNodeFactory().textNode(message(error)));
         turn.completedAt = OffsetDateTime.now();
+    }
+
+    @Transactional
+    public void turnProgress(String externalTurnId, String stage, String message, String query) {
+        CodexTurn turn = CodexTurn.find("externalTurnId", externalTurnId).firstResult();
+        if (turn == null || !"RUNNING".equals(turn.status)) return;
+        appendProgress(turn, stage, message, query);
+    }
+
+    private void appendProgress(CodexTurn turn, String stage, String message, String query) {
+        ArrayNode events = readProgress(turn.progressJson);
+        ObjectNode event = progress(stage, message, query);
+        events.add(event);
+        while (events.size() > 30) events.remove(0);
+        turn.progressJson = events.toString();
+    }
+
+    private ArrayNode readProgress(String value) {
+        try {
+            JsonNode node = mapper.readTree(value == null ? "[]" : value);
+            if (node.isArray()) return (ArrayNode) node;
+        } catch (Exception ignored) {
+        }
+        return mapper.createArrayNode();
+    }
+
+    private ObjectNode progress(String stage, String message, String query) {
+        ObjectNode event = mapper.createObjectNode();
+        event.put("stage", stage);
+        event.put("message", message == null || message.isBlank() ? "正在执行" : message);
+        if (query != null && !query.isBlank()) event.put("query", query);
+        event.put("at", OffsetDateTime.now().toString());
+        return event;
     }
 
     private String json(JsonNode value) {

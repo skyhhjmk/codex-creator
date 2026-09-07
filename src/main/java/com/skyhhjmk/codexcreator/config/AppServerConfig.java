@@ -19,6 +19,10 @@ public interface AppServerConfig {
     @WithDefault("120S")
     Duration requestTimeout();
 
+    /** A turn can include several web searches and a long-form draft, unlike a small RPC acknowledgement. */
+    @WithDefault("10M")
+    Duration turnCompletionTimeout();
+
     @WithDefault("2S")
     Duration restartBackoff();
 

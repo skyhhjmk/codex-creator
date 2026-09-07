@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 @ApplicationScoped
 public class CodexAppServerProviderAdapter implements ProviderAdapter {
@@ -74,6 +75,8 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                                     return CompletableFuture.failedFuture(new IllegalStateException("app-server did not return turn id"));
                                 }
                                 persistence.turnStarted(request.taskId(), threadDbId, turnId, request.input());
+                                Consumer<ObjectNode> progressListener = event -> recordProgress(turnId, event);
+                                supervisor.addNotificationListener(progressListener);
                                 return supervisor.awaitTurnCompletion(threadId, turnId)
                                         .thenApply(completed -> {
                                             persistence.turnCompleted(turnId, completed.completed());
@@ -81,10 +84,24 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
                                                     threadId, turnId);
                                         })
                                         .whenComplete((ignored, error) -> {
+                                            supervisor.removeNotificationListener(progressListener);
                                             if (error != null) persistence.turnFailed(turnId, error);
                                         });
                             });
                 });
+    }
+
+    private void recordProgress(String turnId, ObjectNode event) {
+        if (!"item/completed".equals(event.path("method").asText())) return;
+        JsonNode params = event.path("params");
+        String eventTurnId = params.path("turnId").asText(
+                params.path("item").path("turnId").asText(""));
+        if (!turnId.equals(eventTurnId)) return;
+        JsonNode item = params.path("item");
+        if (!"webSearch".equals(item.path("type").asText())) return;
+        String query = item.path("query").asText("").trim();
+        persistence.turnProgress(turnId, "WEB_SEARCH",
+                query.isBlank() ? "已完成一次网页检索" : "正在检索公开资料", query);
     }
 
     private ProviderResponse response(AppServerTurnResult turnResult, String operation, String reasoningEffort,

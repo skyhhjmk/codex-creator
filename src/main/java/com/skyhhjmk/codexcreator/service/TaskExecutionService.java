@@ -23,6 +23,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -364,7 +365,8 @@ public class TaskExecutionService {
                 return safeFallback;
             }
             ZoneId zone = ZoneId.of(retryZone == null || retryZone.isBlank() ? "Asia/Shanghai" : retryZone);
-            LocalDateTime target = LocalDateTime.of(LocalDate.now(zone), LocalTime.of(hour, minute));
+            LocalDateTime target = LocalDateTime.of(now.atZoneSameInstant(zone).toLocalDate(),
+                    LocalTime.of(hour, minute));
             OffsetDateTime retryAt = target.atZone(zone).toOffsetDateTime();
             if (!retryAt.isAfter(now)) retryAt = retryAt.plusDays(1);
             // Leave a small margin after the provider's advertised reset time.
@@ -490,6 +492,39 @@ public class TaskExecutionService {
     @Transactional
     public RuntimeInferenceResponse snapshot(Long id) {
         return toResponse(findById(id));
+    }
+
+    @Transactional
+    public Map<String, Object> executionView(Long taskId) {
+        AutomationTask task = findById(taskId);
+        if (task == null) return Map.of();
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("status", task.status);
+        view.put("attemptCount", task.attemptCount);
+        view.put("startedAt", task.startedAt);
+        view.put("nextAttemptAt", task.nextAttemptAt);
+        view.put("error", task.errorMessage == null ? "" : task.errorMessage);
+        List<Map<String, Object>> attempts = TaskAttempt.<TaskAttempt>find(
+                        "task.id = ?1 order by attemptNumber desc", taskId)
+                .page(0, 10).list().stream().map(this::attemptView).toList();
+        view.put("attempts", attempts);
+        CodexTurn turn = CodexTurn.find("task.id = ?1 order by startedAt desc", taskId).firstResult();
+        view.put("turnStatus", turn == null ? null : turn.status);
+        view.put("events", turn == null ? List.of() : parse(turn.progressJson));
+        return view;
+    }
+
+    private Map<String, Object> attemptView(TaskAttempt attempt) {
+        // A running attempt has no completedAt yet. Map.of rejects null values
+        // and used to turn a harmless in-progress task into an API NPE.
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("number", attempt.attemptNumber);
+        view.put("status", attempt.status);
+        view.put("provider", attempt.provider == null ? "" : attempt.provider);
+        view.put("startedAt", attempt.startedAt);
+        view.put("completedAt", attempt.completedAt);
+        view.put("error", attempt.errorMessage == null ? "" : attempt.errorMessage);
+        return view;
     }
 
     @Transactional

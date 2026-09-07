@@ -40,6 +40,11 @@ public class CodexTurn extends PanacheEntityBase {
     @Column(name = "error", columnDefinition = "jsonb")
     public String errorJson;
 
+    /** Sanitized milestones only; never stores model reasoning or source-page content. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "progress", columnDefinition = "jsonb", nullable = false)
+    public String progressJson = "[]";
+
     @Column(name = "started_at", nullable = false)
     public OffsetDateTime startedAt;
 

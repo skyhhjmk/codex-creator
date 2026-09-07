@@ -38,6 +38,12 @@ public class TopicAutomationSettings extends PanacheEntityBase {
     @Column(name = "last_error", columnDefinition = "text")
     public String lastError;
 
+    @Column(name = "promotion_enabled", nullable = false)
+    public boolean promotionEnabled;
+
+    @Column(name = "promotion_markdown", columnDefinition = "text")
+    public String promotionMarkdown;
+
     @Column(name = "updated_at", nullable = false)
     public OffsetDateTime updatedAt;
 }

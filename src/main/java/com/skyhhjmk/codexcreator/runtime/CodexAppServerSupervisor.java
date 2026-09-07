@@ -158,7 +158,10 @@ public class CodexAppServerSupervisor {
             }
         };
         addNotificationListener(listener);
-        result.orTimeout(config.requestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+        // A completed turn is an asynchronous workload, not a short JSON-RPC
+        // acknowledgement. Keep its timeout independent so a normal web-search
+        // or long-form writing turn does not surface as a failed UI task.
+        result.orTimeout(config.turnCompletionTimeout().toMillis(), TimeUnit.MILLISECONDS)
                 .whenComplete((ignored, error) -> {
                     removeNotificationListener(listener);
                     completedItems.remove(eventKey);
