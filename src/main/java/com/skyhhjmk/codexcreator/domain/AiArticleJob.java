@@ -50,6 +50,9 @@ public class AiArticleJob extends PanacheEntityBase {
     @Column(columnDefinition = "text")
     public String instructions;
 
+    @Column(name = "reasoning_effort", nullable = false, length = 16)
+    public String reasoningEffort = "high";
+
     @Column(name = "requires_practical_verification", nullable = false)
     public boolean requiresPracticalVerification;
 

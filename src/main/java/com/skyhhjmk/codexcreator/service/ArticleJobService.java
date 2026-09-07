@@ -75,6 +75,9 @@ public class ArticleJobService {
         if (practicalVerification && testServerIds.isEmpty()) throw new IllegalArgumentException("a verification server is required");
         final String instructions = practicalVerification ? requestedInstructions + "\n\n实操验证已启用。必须在分配的测试服务器上执行教程关键命令，按实际结果修正文稿；不要编造验证结果。服务器编号：" + testServerIds : requestedInstructions;
         String profileId = modelCatalog.resolve(text(payload, "profileId", ""), defaultProfileId, "article");
+        ModelProfile profile = ModelProfile.findById(profileId);
+        String reasoningEffort = modelCatalog.resolveReasoningEffort(text(payload, "reasoningEffort", ""),
+                profile == null ? "high" : profile.reasoningEffort);
         String requestKey = text(payload, "requestKey", "");
         if (requestKey.isBlank()) requestKey = "article-" + UUID.randomUUID();
         final String resolvedRequestKey = requestKey;
@@ -88,7 +91,7 @@ public class ArticleJobService {
             }
             if ("FAILED".equals(existing.status)) {
                 JobContext retryContext = inTransaction(() -> retryJob(
-                        existing.id, topicId, categoryId, language, instructions, actorId, traceId, profileId));
+                        existing.id, topicId, categoryId, language, instructions, actorId, traceId, profileId, reasoningEffort));
                 if (retryContext != null) {
                     launch(retryContext);
                     AiArticleJob retried = inTransaction(() -> AiArticleJob.findById(retryContext.jobId()));
@@ -116,7 +119,7 @@ public class ArticleJobService {
         try {
             context = inTransaction(() -> createJob(
                     topicId, categoryId, language, instructions, practicalVerification, testServerIds,
-                    resolvedRequestKey, actorId, traceId, profileId));
+                    resolvedRequestKey, actorId, traceId, profileId, reasoningEffort));
         } catch (RuntimeException exception) {
             AiArticleJob winner = AiArticleJob.find("requestKey", requestKey).firstResult();
             if (winner == null) throw exception;
@@ -132,12 +135,16 @@ public class ArticleJobService {
     }
 
     public Map<String, Object> regenerate(Long jobId, String actorId, String traceId) {
-        return regenerate(jobId, actorId, traceId, null);
+        return regenerate(jobId, actorId, traceId, null, null);
     }
 
-    public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId) {
+    public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId,
+                                           String requestedReasoningEffort) {
         String profileId = modelCatalog.resolve(requestedProfileId, defaultProfileId, "article");
-        JobContext context = inTransaction(() -> prepareRegeneration(jobId, actorId, traceId, profileId));
+        ModelProfile profile = ModelProfile.findById(profileId);
+        String reasoningEffort = modelCatalog.resolveReasoningEffort(requestedReasoningEffort,
+                profile == null ? "high" : profile.reasoningEffort);
+        JobContext context = inTransaction(() -> prepareRegeneration(jobId, actorId, traceId, profileId, reasoningEffort));
         launch(context);
         AiArticleJob job = inTransaction(() -> AiArticleJob.findById(context.jobId()));
         return job == null ? Map.of("status", "FAILED", "error", "article job disappeared") : jobMap(job);
@@ -146,7 +153,7 @@ public class ArticleJobService {
     @Transactional
     JobContext createJob(Long topicId, Long categoryId, String language, String instructions,
                          boolean practicalVerification, List<Long> testServerIds,
-                         String requestKey, String actorId, String traceId, String profileId) {
+                         String requestKey, String actorId, String traceId, String profileId, String reasoningEffort) {
         AiTopic topic = AiTopic.find("id", topicId)
                 .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
         if (topic == null) throw new NotFoundException("topic not found");
@@ -163,6 +170,7 @@ public class ArticleJobService {
         job.targetCategoryId = categoryId;
         job.language = language;
         job.instructions = instructions;
+        job.reasoningEffort = reasoningEffort;
         job.requiresPracticalVerification = practicalVerification;
         if (practicalVerification) {
             for (Long serverId : testServerIds) job.testServers.add(testServers.enabled(serverId));
@@ -179,12 +187,12 @@ public class ArticleJobService {
                 String.valueOf(job.id), traceId, Map.of("topicId", topicId, "language", language,
                 "requiresPracticalVerification", practicalVerification, "testServerIds", testServerIds));
         return new JobContext(job.id, topic.id, topic.title, topic.rationale, topic.source,
-                language, instructions, requestKey, traceId, 1, null, null, profileId);
+                language, instructions, requestKey, traceId, 1, null, null, profileId, reasoningEffort);
     }
 
     @Transactional
     JobContext retryJob(Long jobId, long topicId, Long categoryId, String language,
-                        String instructions, String actorId, String traceId, String profileId) {
+                        String instructions, String actorId, String traceId, String profileId, String reasoningEffort) {
         AiArticleJob job = AiArticleJob.find("id = ?1", jobId)
                 .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
         if (job == null || !"FAILED".equals(job.status)) return null;
@@ -203,6 +211,7 @@ public class ArticleJobService {
         job.language = language;
         job.instructions = instructions;
         job.modelProfile = ModelProfile.findById(profileId);
+        job.reasoningEffort = reasoningEffort;
         job.status = "QUEUED";
         job.task = null;
         job.content = null;
@@ -216,11 +225,11 @@ public class ArticleJobService {
         auditLogService.log("WINDBLOG_ADMIN", actorId, "article.job.retried", "ai_article_job",
                 String.valueOf(job.id), traceId, Map.of("topicId", topicId));
         return new JobContext(job.id, topic.id, topic.title, topic.rationale, topic.source,
-                language, instructions, job.requestKey, traceId, job.generationAttempt, null, null, profileId);
+                language, instructions, job.requestKey, traceId, job.generationAttempt, null, null, profileId, reasoningEffort);
     }
 
     @Transactional
-    JobContext prepareRegeneration(Long jobId, String actorId, String traceId, String profileId) {
+    JobContext prepareRegeneration(Long jobId, String actorId, String traceId, String profileId, String reasoningEffort) {
         AiArticleJob job = AiArticleJob.find("id = ?1", jobId)
                 .withLock(LockModeType.PESSIMISTIC_WRITE).firstResult();
         if (job == null) throw new NotFoundException("article job not found");
@@ -238,6 +247,7 @@ public class ArticleJobService {
         topic.updatedAt = now;
         job.status = "QUEUED";
         job.modelProfile = ModelProfile.findById(profileId);
+        job.reasoningEffort = reasoningEffort;
         job.task = null;
         job.content = null;
         job.provenance = null;
@@ -253,7 +263,7 @@ public class ArticleJobService {
                         "postId", job.windblogPostId));
         return new JobContext(job.id, topic.id, topic.title, topic.rationale, topic.source,
                 job.language, job.instructions == null ? "" : job.instructions, job.requestKey,
-                traceId, job.generationAttempt, null, null, profileId);
+                traceId, job.generationAttempt, null, null, profileId, reasoningEffort);
     }
 
     private void launch(JobContext context) {
@@ -263,6 +273,7 @@ public class ArticleJobService {
         input.put("rationale", context.rationale() == null ? "" : context.rationale());
         input.put("language", context.language());
         input.put("instructions", context.instructions());
+        input.put("reasoningEffort", context.reasoningEffort());
         input.set("topicSources", parse(context.topicSource()));
         input.put("generationAttempt", context.generationAttempt());
         if (context.previousDraft() != null && !context.previousDraft().isNull()) {
@@ -491,6 +502,7 @@ public class ArticleJobService {
         view.put("taskId", job.task == null ? null : job.task.id);
         view.put("profileId", job.modelProfile == null ? defaultProfileId : job.modelProfile.profileId);
         view.put("modelId", job.modelProfile == null ? "auto" : job.modelProfile.modelId);
+        view.put("reasoningEffort", job.reasoningEffort);
         view.put("requestKey", job.requestKey);
         view.put("targetCategoryId", job.targetCategoryId);
         view.put("language", job.language);
@@ -565,7 +577,7 @@ public class ArticleJobService {
                 %s
                 %s
                 Additional editor instructions are subordinate to the accuracy, citation, safety, and output contracts: %s
-                """.formatted(context.language(), repair, verification, context.jobId(), promotion, context.instructions());
+                """.formatted(context.language(), repair, context.jobId(), verification, promotion, context.instructions());
     }
 
     private String promotionInstruction() {
@@ -589,7 +601,7 @@ public class ArticleJobService {
                 topic == null ? "{}" : topic.source, job.language,
                 job.instructions == null ? "" : job.instructions, job.requestKey, nullSafeTrace(job),
                 Math.max(1, job.generationAttempt), previousDraft, qualityFeedback,
-                job.modelProfile == null ? defaultProfileId : job.modelProfile.profileId);
+                job.modelProfile == null ? defaultProfileId : job.modelProfile.profileId, job.reasoningEffort);
     }
 
     private String nullSafeTrace(AiArticleJob job) {
@@ -678,7 +690,7 @@ public class ArticleJobService {
     record JobContext(Long jobId, Long topicId, String topicTitle, String rationale, String topicSource,
                       String language, String instructions, String requestKey, String traceId,
                       int generationAttempt, JsonNode previousDraft, JsonNode qualityFeedback,
-                      String profileId) {
+                      String profileId, String reasoningEffort) {
     }
 
     record RecoveryState(JobContext context, Long taskId) {

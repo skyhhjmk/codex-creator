@@ -43,7 +43,7 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
     @Override
     public CompletableFuture<ProviderResponse> infer(ProviderRequest request) {
         ModelProfile profile = request.profile();
-        String reasoningEffort = effectiveReasoningEffort(request.operation(), profile);
+        String reasoningEffort = requestedReasoningEffort(request.input(), request.operation(), profile);
         ObjectNode threadParams = mapper.createObjectNode();
         if (profile.modelId != null && !profile.modelId.isBlank() && !"auto".equalsIgnoreCase(profile.modelId)) {
             threadParams.put("model", profile.modelId);
@@ -233,6 +233,11 @@ public class CodexAppServerProviderAdapter implements ProviderAdapter {
         String configured = "article".equalsIgnoreCase(operation) ? articleReasoningEffort
                 : "topic".equalsIgnoreCase(operation) ? topicReasoningEffort : profile.reasoningEffort;
         return configured == null || configured.isBlank() ? "medium" : configured.trim().toLowerCase();
+    }
+
+    private String requestedReasoningEffort(JsonNode input, String operation, ModelProfile profile) {
+        String requested = input == null ? "" : input.path("reasoningEffort").asText("").trim().toLowerCase();
+        return requested.isBlank() ? effectiveReasoningEffort(operation, profile) : requested;
     }
 
     private static boolean isFailedTurn(JsonNode turn) {
