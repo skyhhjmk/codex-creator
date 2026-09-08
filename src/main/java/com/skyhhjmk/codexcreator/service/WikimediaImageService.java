@@ -3,6 +3,7 @@ package com.skyhhjmk.codexcreator.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -22,7 +23,28 @@ import java.util.List;
 public class WikimediaImageService {
     private static final String API = "https://commons.wikimedia.org/w/api.php";
     private static final int MAX_BYTES = 8 * 1024 * 1024;
-    private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    private HttpClient client;
+
+    @ConfigProperty(name = "codex.creator.wikimedia.proxy-url")
+    java.util.Optional<String> proxyUrl;
+
+    @PostConstruct
+    void initializeClient() {
+        client = createClient(proxyUrl.orElse(""));
+    }
+
+    static HttpClient createClient(String proxyUrl) {
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
+        if (proxyUrl != null && !proxyUrl.isBlank()) {
+            URI proxy = URI.create(proxyUrl);
+            if (!"http".equalsIgnoreCase(proxy.getScheme()) || proxy.getHost() == null) {
+                throw new IllegalArgumentException("Wikimedia proxy must be an HTTP proxy URL");
+            }
+            builder.proxy(java.net.ProxySelector.of(new java.net.InetSocketAddress(
+                    proxy.getHost(), proxy.getPort() < 0 ? 80 : proxy.getPort())));
+        }
+        return builder.build();
+    }
 
     @Inject ObjectMapper mapper;
 
