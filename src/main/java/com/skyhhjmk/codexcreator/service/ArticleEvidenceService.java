@@ -19,6 +19,11 @@ public class ArticleEvidenceService {
 
     @Transactional
     public void recordImage(Long jobId, String mediaUrl) {
+        recordImage(jobId, mediaUrl, null, null, null, null);
+    }
+
+    @Transactional
+    public void recordImage(Long jobId, String mediaUrl, String sourcePage, String licenseName, String licenseUrl, String attribution) {
         if (jobId == null || mediaUrl == null || mediaUrl.isBlank()) {
             throw new IllegalArgumentException("article job and uploaded image URL are required");
         }
@@ -29,6 +34,10 @@ public class ArticleEvidenceService {
         evidence.generationAttempt = Math.max(1, job.generationAttempt);
         evidence.kind = "IMAGE";
         evidence.mediaUrl = mediaUrl.trim();
+        evidence.sourcePage = sourcePage;
+        evidence.licenseName = licenseName;
+        evidence.licenseUrl = licenseUrl;
+        evidence.attribution = attribution;
         evidence.createdAt = OffsetDateTime.now();
         evidence.persist();
     }

@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -34,12 +36,17 @@ class AppServerJsonlFixtureTest {
             return mapper.createObjectNode().put("decision", "decline");
         });
         client.attach(process);
-        client.addNotificationListener(notifications::add);
+        CountDownLatch received = new CountDownLatch(3);
+        client.addNotificationListener(notification -> {
+            notifications.add(notification);
+            received.countDown();
+        });
         try {
             JsonNode result = client.request("turn/start", mapper.createObjectNode(), Duration.ofSeconds(2)).get();
 
             assertEquals("turn-1", result.path("turn").path("id").asText());
             assertEquals("item/approval/request", serverRequest.get().path("method").asText());
+            assertTrue(received.await(2, TimeUnit.SECONDS), "all notifications should arrive");
             assertEquals(3, notifications.size());
             assertEquals("webSearch", notifications.get(0).path("params").path("item").path("type").asText());
             assertEquals("agentMessage", notifications.get(1).path("params").path("item").path("type").asText());

@@ -63,14 +63,19 @@ public class TestServerService {
             Process process = new ProcessBuilder("ssh", "-i", keyFile.toString(), "-p", String.valueOf(server.sshPort),
                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=accept-new",
                     server.sshUser + "@" + server.host, command).redirectErrorStream(true).start();
+            java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+            Thread reader = Thread.ofVirtual().start(() -> drainOutput(process.getInputStream(), captured));
             boolean completed = process.waitFor(90, TimeUnit.SECONDS);
             if (!completed) {
                 process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+                reader.join(5000);
                 String output = "SSH command timed out after 90 seconds";
                 articleEvidence.recordVerification(articleJobId, serverId, command, -1, output);
                 return Map.of("ok", false, "exitCode", -1, "output", output);
             }
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            reader.join(5000);
+            String output = captured.toString(StandardCharsets.UTF_8);
             output = ArticleEvidenceService.sanitize(output, 2_000);
             int exitCode = process.exitValue();
             articleEvidence.recordVerification(articleJobId, serverId, command, exitCode, output);
@@ -78,6 +83,20 @@ public class TestServerService {
         } catch (Exception exception) { throw new BadRequestException("SSH verification failed: " + exception.getMessage(), exception); }
         finally { if (keyFile != null) try { Files.deleteIfExists(keyFile); } catch (Exception ignored) { } }
     }
+    // Drain the pipe while SSH runs, retaining a bounded prefix for the article.
+    static void drainOutput(java.io.InputStream input, java.io.ByteArrayOutputStream captured) {
+        try (input) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                int retained = Math.min(count, Math.max(0, 16384 - captured.size()));
+                if (retained > 0) captured.write(buffer, 0, retained);
+            }
+        } catch (java.io.IOException ignored) {
+            // Process termination closes the pipe.
+        }
+    }
+
     public Map<String,Object> view(TestServer s){return Map.of("id",s.id,"name",s.name,"host",s.host,"sshPort",s.sshPort,"sshUser",s.sshUser,"enabled",s.enabled,"privateKeyConfigured",s.privateKeyEncrypted!=null&&!s.privateKeyEncrypted.isBlank());}
     private String encrypt(String clear){try{byte[] iv=new byte[12];new SecureRandom().nextBytes(iv);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key(),new GCMParameterSpec(128,iv));return Base64.getEncoder().encodeToString(iv)+":"+Base64.getEncoder().encodeToString(c.doFinal(clear.getBytes(StandardCharsets.UTF_8)));}catch(Exception e){throw new BadRequestException("cannot protect test-server private key",e);}}
     private String decrypt(String value){try{String[] p=value.split(":",2);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,Base64.getDecoder().decode(p[0])));return new String(c.doFinal(Base64.getDecoder().decode(p[1])),StandardCharsets.UTF_8);}catch(Exception e){throw new IllegalStateException("cannot decrypt test-server private key",e);}}

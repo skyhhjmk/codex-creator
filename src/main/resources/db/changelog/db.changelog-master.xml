@@ -12,4 +12,6 @@
     <include file="db/changelog/008-turn-progress.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/009-article-job-evidence.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/010-article-reasoning-effort.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/011-wikimedia-image-evidence.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/012-wikimedia-tool-permissions.sql" relativeToChangelogFile="false"/>
 </databaseChangeLog>

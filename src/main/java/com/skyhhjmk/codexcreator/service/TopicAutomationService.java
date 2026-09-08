@@ -119,6 +119,10 @@ public class TopicAutomationService {
         settings.lastError = null;
         settings.updatedAt = OffsetDateTime.now();
         settings.persist();
+        // Force the database write before reporting success to WindBlog.  Without
+        // this, a failed flush can leave the admin page showing the in-memory
+        // response even though a subsequent reload reads the old configuration.
+        settings.flush();
         auditLogService.log("WINDBLOG_ADMIN", actorId, "topic.settings.updated",
                 "topic_automation_settings", "1", traceId, Map.of(
                         "enabled", enabled, "intervalMinutes", interval,

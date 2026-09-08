@@ -129,7 +129,7 @@ public class AdminResource {
     public Map<String, Object> workflows() {
         return Map.of("operations", List.of("summarize", "moderate", "translate", "slug",
                 "assistant", "topic", "article", "embedding", "category.read", "category.write",
-                "tag.read", "tag.write", "media.upload"), "experimentalApi", false);
+                "tag.read", "tag.write", "media.search", "media.upload"), "experimentalApi", false);
     }
 
     @GET

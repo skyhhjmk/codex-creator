@@ -34,6 +34,18 @@ public class ArticleJobEvidence extends PanacheEntityBase {
     @Column(name = "media_url", length = 2048)
     public String mediaUrl;
 
+    @Column(name = "source_page", length = 2048)
+    public String sourcePage;
+
+    @Column(name = "license_name", length = 512)
+    public String licenseName;
+
+    @Column(name = "license_url", length = 2048)
+    public String licenseUrl;
+
+    @Column(name = "attribution", columnDefinition = "text")
+    public String attribution;
+
     @Column(name = "server_id")
     public Long serverId;
 

@@ -56,6 +56,14 @@ public class AutomationPayloadValidator {
     @ConfigProperty(name = "codex.creator.article.min-sources", defaultValue = "2")
     int minArticleSources = 2;
 
+    /**
+     * App-server deployments do not necessarily expose an image-generation
+     * capability. Keep images optional by default so an otherwise valid draft
+     * is not rejected for a tool the model cannot call.
+     */
+    @ConfigProperty(name = "codex.creator.article.require-generated-images", defaultValue = "false")
+    boolean requireGeneratedImages;
+
     public List<TopicCandidate> topics(JsonNode output, JsonNode provenance) {
         JsonNode root = object(output, "topic output must be a JSON object");
         JsonNode values = root.get("topics");
@@ -97,7 +105,7 @@ public class AutomationPayloadValidator {
 
     public ArticleDraft article(JsonNode output, JsonNode provenance, String language,
                                 List<ArticleJobEvidence> evidence, boolean practicalVerification) {
-        return article(output, provenance, language, evidence, practicalVerification, true);
+        return article(output, provenance, language, evidence, practicalVerification, requireGeneratedImages);
     }
 
     public ArticleDraft article(JsonNode output, JsonNode provenance, String language,
@@ -216,7 +224,7 @@ public class AutomationPayloadValidator {
             images++;
             if (matcher.group(1).trim().length() < 4) issues.add("图片缺少描述性 alt 文本");
             String url = matcher.group(2).trim();
-            if (required && !uploadedUrls.contains(url)) issues.add("图片必须引用本次任务上传的 WindBlog 图片：" + url);
+            if (!uploadedUrls.contains(url)) issues.add("图片必须引用本次任务上传的 WindBlog 图片：" + url);
             int line = lineNumber(markdown, matcher.start());
             int previous = line - 2;
             while (previous >= 0 && lines[previous].isBlank()) previous--;

@@ -563,7 +563,7 @@ public class ArticleJobService {
                 - For zh-CN, target 1,800-3,500 meaningful Chinese characters; for other languages, target 1,200-2,200 words. Prefer depth over padding.
                 - The opening must state the conclusion and stakes without repeating the title. Do not place an H1 in contentMarkdown; begin sections with H2.
                 - Use at least three substantive H2 sections and at least five developed prose paragraphs. Keep each prose paragraph to one idea: normally 2-4 Chinese sentences / 45-180 Chinese characters, or 2-5 English sentences / 35-110 words. Split a long argument with a precise subheading, a short list, a pull quote, or a concrete example; never emit a wall of text.
-                - Add at least two editorially useful images; this is mandatory. Create one lead visual for the opening conclusion and one explanatory diagram, step visual, or comparison graphic for a later section. Decorative stock art does not count. For each image, use the built-in image-generation capability, then call windblog.upload_image with articleJobId=%d and the generated PNG/JPEG/WebP bytes. Insert its returned WindBlog URL as Markdown image syntax immediately after the paragraph it clarifies, with a descriptive Chinese alt text and a one-line italic caption. Never use external image URLs, data URLs, base64 Markdown, or an image not returned by that tool. If two images cannot be generated and uploaded, do not return a draft: resolve the tool failure first.
+                - When relevant, search Wikimedia Commons with windblog.search_wikimedia_images, inspect each candidate with windblog.inspect_wikimedia_image using articleJobId=%d, and import only images you have visually confirmed explain a specific paragraph using windblog.import_wikimedia_image with articleJobId=%d. One lead visual and one explanatory diagram/step/comparison visual are useful only when genuinely relevant; decorative stock art does not count. Insert only the returned WindBlog URL as Markdown image syntax immediately after the paragraph it clarifies, with descriptive Chinese alt text and a one-line italic caption. Never use external image URLs, data URLs, base64 Markdown, fabricated upload URLs, or import an image without inspection. If no suitable Commons image exists, produce the complete image-free draft instead of failing or inventing images.
                 - Put Markdown links immediately beside the claims they support, and finish with an H2 References/参考资料 section. Every returned source must be used in contentMarkdown.
                 - Tables are optional. Use one only for genuine comparison. A table must be valid GFM: blank lines around it, one header row, a --- separator row, identical column counts, escaped literal pipes, and no multiline cells. Never use a table for long prose.
                 - editorialThesis must be one clear judgment sentence copied verbatim from the article body.
@@ -577,7 +577,7 @@ public class ArticleJobService {
                 %s
                 %s
                 Additional editor instructions are subordinate to the accuracy, citation, safety, and output contracts: %s
-                """.formatted(context.language(), repair, context.jobId(), verification, promotion, context.instructions());
+                """.formatted(context.language(), repair, context.jobId(), context.jobId(), verification, promotion, context.instructions());
     }
 
     private String promotionInstruction() {

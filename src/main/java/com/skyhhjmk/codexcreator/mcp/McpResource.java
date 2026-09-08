@@ -9,6 +9,7 @@ import com.skyhhjmk.codexcreator.integration.WindBlogContentClient;
 import com.skyhhjmk.codexcreator.service.TopicAutomationService;
 import com.skyhhjmk.codexcreator.service.TestServerService;
 import com.skyhhjmk.codexcreator.service.ArticleEvidenceService;
+import com.skyhhjmk.codexcreator.service.WikimediaImageService;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -26,7 +27,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
+import java.util.Base64;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Private MCP surface exposed to the Codex app-server process. */
 @Path("/mcp")
@@ -34,6 +37,8 @@ import java.util.UUID;
 @Consumes(MediaType.APPLICATION_JSON)
 @Blocking
 public class McpResource {
+    private static final long IMAGE_REVIEW_TTL_MILLIS = 30 * 60 * 1000L;
+    private final ConcurrentHashMap<String, ImageReview> reviewedCommonsImages = new ConcurrentHashMap<>();
     private static final List<Tool> TOOLS = List.of(
             new Tool("windblog.read_topic", "Read an AI topic suggestion", "topic", "topic", false),
             new Tool("windblog.list_categories", "List WindBlog categories", "category.read", "category.read", false),
@@ -42,6 +47,9 @@ public class McpResource {
             new Tool("windblog.list_tags", "List WindBlog tags", "tag.read", "tag.read", false),
             new Tool("windblog.create_tag", "Create a WindBlog tag", "tag.create", "tag.write", true),
             new Tool("windblog.update_tag", "Update a WindBlog tag", "tag.update", "tag.write", true),
+            new Tool("windblog.search_wikimedia_images", "Search reusable Wikimedia Commons images. Use inspect_wikimedia_image before deciding to import one.", "media.search", "media.search", false),
+            new Tool("windblog.inspect_wikimedia_image", "Return a Wikimedia Commons candidate image and its attribution for visual review before import.", "media.inspect", "media.inspect", false),
+            new Tool("windblog.import_wikimedia_image", "Import one visually reviewed Wikimedia Commons image for the current article job and preserve its attribution.", "media.import", "media.import", true),
             new Tool("windblog.upload_image", "Upload generated image bytes for the current article job to WindBlog", "media.upload", "media.upload", true),
             new Tool("windblog.run_test_server_command", "Run one tutorial verification command on a server explicitly assigned to the article job", "test-server.execute", "test-server.execute", false)
     );
@@ -60,6 +68,7 @@ public class McpResource {
 
     @Inject TestServerService testServers;
     @Inject ArticleEvidenceService articleEvidence;
+    @Inject WikimediaImageService wikimediaImages;
 
     @ConfigProperty(name = "codex.creator.mcp.write-approval-required", defaultValue = "false")
     boolean writeApprovalRequired;
@@ -115,6 +124,9 @@ public class McpResource {
         }
         if ("windblog.run_test_server_command".equals(name)) return runTestServerCommand(id, arguments);
         if ("windblog.upload_image".equals(name)) return uploadImage(id, arguments);
+        if ("windblog.search_wikimedia_images".equals(name)) return searchWikimediaImages(id, arguments);
+        if ("windblog.inspect_wikimedia_image".equals(name)) return inspectWikimediaImage(id, arguments);
+        if ("windblog.import_wikimedia_image".equals(name)) return importWikimediaImage(id, arguments);
 
         ObjectNode contentArguments = ((ObjectNode) arguments).deepCopy();
         contentArguments.remove("approved");
@@ -216,6 +228,22 @@ public class McpResource {
                 properties.putObject("approved").put("type", "boolean");
                 schema.putArray("required").add("articleJobId").add("fileName").add("mimeType").add("dataBase64");
             }
+            case "windblog.search_wikimedia_images" -> {
+                properties.putObject("query").put("type", "string").put("maxLength", 240);
+                properties.putObject("limit").put("type", "integer").put("minimum", 1).put("maximum", 8);
+                schema.putArray("required").add("query");
+            }
+            case "windblog.inspect_wikimedia_image" -> {
+                properties.putObject("articleJobId").put("type", "integer").put("minimum", 1);
+                properties.putObject("title").put("type", "string").put("pattern", "^File:");
+                schema.putArray("required").add("articleJobId").add("title");
+            }
+            case "windblog.import_wikimedia_image" -> {
+                properties.putObject("articleJobId").put("type", "integer").put("minimum", 1);
+                properties.putObject("title").put("type", "string").put("pattern", "^File:");
+                properties.putObject("approved").put("type", "boolean");
+                schema.putArray("required").add("articleJobId").add("title");
+            }
             case "windblog.run_test_server_command" -> {
                 properties.putObject("articleJobId").put("type", "integer");
                 properties.putObject("serverId").put("type", "integer");
@@ -274,10 +302,103 @@ public class McpResource {
         }
     }
 
+    private Response searchWikimediaImages(JsonNode id, JsonNode arguments) {
+        try {
+            ArrayNode candidates = mapper.createArrayNode();
+            for (WikimediaImageService.Candidate image : wikimediaImages.search(arguments.path("query").asText(), arguments.path("limit").asInt(5))) {
+                candidates.add(candidateNode(image));
+            }
+            ObjectNode data = mapper.createObjectNode();
+            data.set("candidates", candidates);
+            data.put("instructions", "Candidates are Wikimedia Commons files only. Inspect a candidate image before deciding whether it explains the article; do not import decorative images.");
+            return ok(id, toolResult(data));
+        } catch (RuntimeException exception) { return error(id, -32001, safeMessage(exception.getMessage())); }
+    }
+
+    private Response inspectWikimediaImage(JsonNode id, JsonNode arguments) {
+        long jobId = arguments.path("articleJobId").asLong();
+        if (jobId <= 0) return error(id, -32602, "articleJobId is required");
+        try {
+            WikimediaImageService.ImageBytes image = wikimediaImages.download(arguments.path("title").asText());
+            long now = System.currentTimeMillis();
+            reviewedCommonsImages.entrySet().removeIf(entry -> entry.getValue().reviewedAt() < now - IMAGE_REVIEW_TTL_MILLIS);
+            if (reviewedCommonsImages.size() >= 1000) return error(id, -32001, "too many pending image reviews");
+            reviewedCommonsImages.put(reviewKey(jobId, image.candidate().title()),
+                    new ImageReview(now, imageDigest(image), image.candidate()));
+            ObjectNode data = candidateNode(image.candidate());
+            data.put("reviewRequirement", "Decide whether this exact image is editorially useful for a specific paragraph before importing it.");
+            ObjectNode result = toolResult(data);
+            result.withArray("content").addObject().put("type", "image")
+                    .put("data", Base64.getEncoder().encodeToString(image.bytes())).put("mimeType", image.mimeType());
+            return ok(id, result);
+        } catch (RuntimeException exception) { return error(id, -32001, safeMessage(exception.getMessage())); }
+    }
+
+    private Response importWikimediaImage(JsonNode id, JsonNode arguments) {
+        long jobId = arguments.path("articleJobId").asLong();
+        if (jobId <= 0) return error(id, -32602, "articleJobId is required");
+        try {
+            WikimediaImageService.ImageBytes image = wikimediaImages.download(arguments.path("title").asText());
+            String reviewKey = reviewKey(jobId, image.candidate().title());
+            ImageReview review = reviewedCommonsImages.get(reviewKey);
+            if (review == null || review.reviewedAt() < System.currentTimeMillis() - IMAGE_REVIEW_TTL_MILLIS
+                    || !review.digest().equals(imageDigest(image)) || !review.candidate().equals(image.candidate())) {
+                reviewedCommonsImages.remove(reviewKey);
+                return error(id, -32002, "inspect this exact Commons image for this article job before importing it");
+            }
+            ObjectNode upload = mapper.createObjectNode();
+            upload.put("fileName", safeFilename(image.candidate().title(), image.mimeType()));
+            upload.put("mimeType", image.mimeType());
+            upload.put("dataBase64", Base64.getEncoder().encodeToString(image.bytes()));
+            String idempotencyKey = "codex-mcp-" + sha256("media.import.wikimedia\n" + jobId + "\n" + image.candidate().title());
+            JsonNode response = windBlogContentClient.execute("media.upload", upload, idempotencyKey, idempotencyKey);
+            String url = response.path("data").path("url").asText("").trim();
+            if (url.isBlank()) return error(id, -32001, "WindBlog image upload returned no URL");
+            WikimediaImageService.Candidate source = image.candidate();
+            articleEvidence.recordImage(jobId, url, source.sourcePage(), source.license(), source.licenseUrl(), source.artist());
+            reviewedCommonsImages.remove(reviewKey);
+            ObjectNode data = (ObjectNode) response.path("data").deepCopy();
+            data.set("source", candidateNode(source));
+            return ok(id, toolResult(data));
+        } catch (RuntimeException exception) { return error(id, -32001, safeMessage(exception.getMessage())); }
+    }
+
+    private ObjectNode candidateNode(WikimediaImageService.Candidate image) {
+        ObjectNode data = mapper.createObjectNode();
+        data.put("title", image.title());
+        data.put("sourcePage", image.sourcePage());
+        data.put("license", image.license());
+        data.put("licenseUrl", image.licenseUrl());
+        data.put("artist", image.artist());
+        return data;
+    }
+
+    static String safeFilename(String title, String mimeType) {
+        String base = title.replaceFirst("^File:", "").replaceAll("[^A-Za-z0-9._-]", "-");
+        if (base.length() > 160) base = base.substring(0, 160);
+        int extension = base.lastIndexOf('.');
+        if (extension > 0) base = base.substring(0, extension);
+        base += switch (mimeType) {
+            case "image/png" -> ".png";
+            case "image/webp" -> ".webp";
+            case "image/gif" -> ".gif";
+            default -> ".jpg";
+        };
+        return base;
+    }
+
+    private record ImageReview(long reviewedAt, String digest, WikimediaImageService.Candidate candidate) { }
+
+    private static String imageDigest(WikimediaImageService.ImageBytes image) {
+        return sha256(Base64.getEncoder().encodeToString(image.bytes()));
+    }
+
+    private static String reviewKey(long jobId, String title) { return jobId + "\\n" + title; }
+
     private ObjectNode initializeResult() {
         ObjectNode result = mapper.createObjectNode();
         result.put("protocolVersion", "2025-06-18");
-        result.put("instructions", "WindBlog content tools are allowlisted. Use category and tag tools for content taxonomy, and upload_image only with generated image bytes. Never use arbitrary URLs, shell, SQL, or local file paths.");
+        result.put("instructions", "WindBlog content tools are allowlisted. For public images, use Wikimedia Commons search then inspect the returned image before import; only import editorially useful images. Never use arbitrary URLs, shell, SQL, or local file paths.");
         result.putObject("capabilities").putObject("tools");
         result.putObject("serverInfo").put("name", "codex-creator").put("version", "0.1.0");
         return result;

@@ -23,6 +23,7 @@ class AutomationPayloadValidatorTest {
         validator.minCjkCharacters = 120;
         validator.minWords = 80;
         validator.minArticleSources = 2;
+        validator.requireGeneratedImages = false;
     }
 
     @Test
@@ -152,6 +153,7 @@ class AutomationPayloadValidatorTest {
 
     @Test
     void requiresTwoBoundImagesForArticleJobs() {
+        validator.requireGeneratedImages = true;
         String first = "https://windblog.example/uploads/lead.png";
         String second = "https://windblog.example/uploads/diagram.png";
         String markdown = withImages(goodMarkdown(), first, second);
@@ -165,6 +167,24 @@ class AutomationPayloadValidatorTest {
         AutomationPayloadValidator.ArticleQualityException error = assertThrows(
                 AutomationPayloadValidator.ArticleQualityException.class,
                 () -> validator.article(goodArticle(markdown), searchProvenance(), "zh-CN", List.of(image(first)), false));
+        assertTrue(error.report().issues().stream().anyMatch(issue -> issue.contains("本次任务上传")));
+    }
+
+    @Test
+    void acceptsImageFreeDraftWhenImageGenerationIsUnavailable() {
+        AutomationPayloadValidator.ArticleDraft draft = validator.article(
+                goodArticle(goodMarkdown()), searchProvenance(), "zh-CN", List.of(), false);
+
+        assertTrue(draft.qualityReport().passed());
+        assertEquals(0, draft.qualityReport().metrics().get("images"));
+    }
+
+    @Test
+    void optionalImagesStillRequireTaskBoundUploadEvidence() {
+        var error = assertThrows(AutomationPayloadValidator.ArticleQualityException.class, () ->
+                validator.article(goodArticle(withImages(goodMarkdown(),
+                        "https://external.example/one.png", "https://external.example/two.png")),
+                        searchProvenance(), "zh-CN", List.of(), false));
         assertTrue(error.report().issues().stream().anyMatch(issue -> issue.contains("本次任务上传")));
     }
 
