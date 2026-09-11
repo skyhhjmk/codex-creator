@@ -3,6 +3,7 @@ package com.skyhhjmk.codexcreator.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.skyhhjmk.codexcreator.domain.ArticleJobEvidence;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -567,6 +568,7 @@ public class AutomationPayloadValidator {
                                List<Source> sources, Long categoryId, QualityReport qualityReport) {
     }
 
+    @RegisterForReflection
     public record QualityReport(boolean passed, int score, Map<String, Integer> metrics,
                                 List<String> issues, List<String> warnings) {
     }

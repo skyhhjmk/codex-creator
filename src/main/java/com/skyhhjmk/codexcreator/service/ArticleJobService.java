@@ -166,6 +166,7 @@ public class ArticleJobService {
         AiArticleJob job = new AiArticleJob();
         job.topic = topic;
         job.modelProfile = ModelProfile.findById(profileId);
+        job.modelName = resolveModelName(job.modelProfile, null);
         job.requestKey = requestKey;
         job.targetCategoryId = categoryId;
         job.language = language;
@@ -211,6 +212,7 @@ public class ArticleJobService {
         job.language = language;
         job.instructions = instructions;
         job.modelProfile = ModelProfile.findById(profileId);
+        job.modelName = resolveModelName(job.modelProfile, null);
         job.reasoningEffort = reasoningEffort;
         job.status = "QUEUED";
         job.task = null;
@@ -247,6 +249,7 @@ public class ArticleJobService {
         topic.updatedAt = now;
         job.status = "QUEUED";
         job.modelProfile = ModelProfile.findById(profileId);
+        job.modelName = resolveModelName(job.modelProfile, null);
         job.reasoningEffort = reasoningEffort;
         job.task = null;
         job.content = null;
@@ -502,6 +505,7 @@ public class ArticleJobService {
         view.put("taskId", job.task == null ? null : job.task.id);
         view.put("profileId", job.modelProfile == null ? defaultProfileId : job.modelProfile.profileId);
         view.put("modelId", job.modelProfile == null ? "auto" : job.modelProfile.modelId);
+        view.put("modelName", resolveModelName(job.modelProfile, job.modelName));
         view.put("reasoningEffort", job.reasoningEffort);
         view.put("requestKey", job.requestKey);
         view.put("targetCategoryId", job.targetCategoryId);
@@ -535,6 +539,16 @@ public class ArticleJobService {
                 && (categoryId == null || Objects.equals(job.targetCategoryId, categoryId))
                 && Objects.equals(job.language, language)
                 && Objects.equals(job.instructions == null ? "" : job.instructions, instructions);
+    }
+
+    private String resolveModelName(ModelProfile profile, String snapshot) {
+        if (snapshot != null && !snapshot.isBlank()) return snapshot.trim();
+        if (profile != null) {
+            if (profile.displayName != null && !profile.displayName.isBlank()) return profile.displayName.trim();
+            if (profile.modelId != null && !profile.modelId.isBlank()) return profile.modelId.trim();
+            if (profile.profileId != null && !profile.profileId.isBlank()) return profile.profileId.trim();
+        }
+        return "AI";
     }
 
     private String articlePrompt(JobContext context) {

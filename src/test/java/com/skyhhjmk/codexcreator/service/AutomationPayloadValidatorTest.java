@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.skyhhjmk.codexcreator.domain.ArticleJobEvidence;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -24,6 +25,12 @@ class AutomationPayloadValidatorTest {
         validator.minWords = 80;
         validator.minArticleSources = 2;
         validator.requireGeneratedImages = false;
+    }
+
+    @Test
+    void qualityReportIsRegisteredForNativeJsonSerialization() {
+        assertNotNull(AutomationPayloadValidator.QualityReport.class
+                .getAnnotation(RegisterForReflection.class));
     }
 
     @Test

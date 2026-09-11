@@ -38,6 +38,10 @@ public class AiArticleJob extends PanacheEntityBase {
     @JoinColumn(name = "model_profile_id")
     public ModelProfile modelProfile;
 
+    /** Display-name snapshot of the model selected for this article job. */
+    @Column(name = "model_name", length = 200)
+    public String modelName;
+
     @Column(name = "request_key", nullable = false, unique = true, length = 256)
     public String requestKey;
 
