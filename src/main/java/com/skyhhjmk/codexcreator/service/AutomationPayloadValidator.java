@@ -380,7 +380,7 @@ public class AutomationPayloadValidator {
             String plain = stripMarkdown(block).trim();
             if (plain.isBlank()) continue;
             int length = cjkArticle ? countMatches(CJK, plain) : countMatches(WORD, plain);
-            if (length > (cjkArticle ? 220 : 125)) count++;
+            if (length > (cjkArticle ? 160 : 110)) count++;
         }
         return count;
     }

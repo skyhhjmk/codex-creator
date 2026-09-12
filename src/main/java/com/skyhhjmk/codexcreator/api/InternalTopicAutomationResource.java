@@ -90,7 +90,8 @@ public class InternalTopicAutomationResource {
                     text(payload, "decision", ""), text(payload, "note", ""), actorId, traceId));
             case "article.start" -> ok(articles.start(payload, actorId, traceId));
             case "article.regenerate" -> ok(articles.regenerate(requiredId(payload, "id"), actorId, traceId,
-                    text(payload, "profileId", ""), text(payload, "reasoningEffort", "")));
+                    text(payload, "profileId", ""), text(payload, "reasoningEffort", ""),
+                    text(payload, "repostPolicyCode", ""), payload == null ? null : payload.get("repostPolicy")));
             case "article.read" -> ok(articles.read(requiredId(payload, "id")));
             case "article.acknowledge" -> ok(articles.acknowledgeDraft(requiredId(payload, "id"),
                     requiredId(payload, "postId"), actorId, traceId));

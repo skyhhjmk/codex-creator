@@ -15,4 +15,5 @@
     <include file="db/changelog/011-wikimedia-image-evidence.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/012-wikimedia-tool-permissions.sql" relativeToChangelogFile="false"/>
     <include file="db/changelog/013-article-model-name.sql" relativeToChangelogFile="false"/>
+    <include file="db/changelog/014-article-repost-policy.sql" relativeToChangelogFile="false"/>
 </databaseChangeLog>

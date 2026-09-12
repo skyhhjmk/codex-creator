@@ -48,6 +48,9 @@ public class AiArticleJob extends PanacheEntityBase {
     @Column(name = "target_category_id")
     public Long targetCategoryId;
 
+    @Column(name = "repost_policy_code", nullable = false, length = 64)
+    public String repostPolicyCode = "REQUEST_REQUIRED";
+
     @Column(nullable = false, length = 16)
     public String language = "zh-CN";
 
