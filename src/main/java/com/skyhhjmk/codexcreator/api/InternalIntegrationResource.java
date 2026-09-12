@@ -52,7 +52,7 @@ public class InternalIntegrationResource {
             RuntimeInferenceRequest request = new RuntimeInferenceRequest(
                     event.path("operation").asText(operationFor(eventType)), profileId,
                     event.get("input"), event.path("idempotencyKey").asText(nonce),
-                    event.path("traceId").asText(nonce), event.path("promptVersion").asText("1"));
+                    event.path("traceId").asText(nonce), event.path("promptVersion").asText("1"), false);
             return tasks.infer(request).thenApply(result -> Response.accepted(result).build());
         } catch (Exception exception) {
             return java.util.concurrent.CompletableFuture.completedFuture(

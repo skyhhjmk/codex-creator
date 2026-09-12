@@ -59,6 +59,9 @@ public class TopicAutomationService {
     ModelCatalogService modelCatalog;
 
     @Inject
+    CodexQuotaService quota;
+
+    @Inject
     Instance<TopicAutomationService> self;
 
     @ConfigProperty(name = "codex.creator.default-profile-id", defaultValue = "codex-default")
@@ -72,7 +75,9 @@ public class TopicAutomationService {
         TaskCacheService.LockAttempt lock = cache.acquire("topic-discovery-scheduler", Duration.ofSeconds(90));
         if (lock.status() == TaskCacheService.LockStatus.BUSY) return;
         try {
-            StartContext context = self.get().createScheduledRun();
+            CodexQuotaService.Decision decision = quota.admission(false).join();
+            if (!decision.allowed()) return;
+            StartContext context = self.get().createScheduledRun(decision.accelerated());
             if (context != null) launch(context);
         } finally {
             if (lock.status() == TaskCacheService.LockStatus.ACQUIRED) {
@@ -183,6 +188,11 @@ public class TopicAutomationService {
 
     public Map<String, Object> startManual(String idempotencyKey, String traceId, String actorId,
                                            String requestedProfileId) {
+        return startManual(idempotencyKey, traceId, actorId, requestedProfileId, false);
+    }
+
+    public Map<String, Object> startManual(String idempotencyKey, String traceId, String actorId,
+                                           String requestedProfileId, boolean forceQuota) {
         String profileId = modelCatalog.resolve(requestedProfileId, defaultProfileId, "topic");
         String requestKey = idempotencyKey == null || idempotencyKey.isBlank()
                 ? "manual-topic-" + UUID.randomUUID() : idempotencyKey.trim();
@@ -194,7 +204,7 @@ public class TopicAutomationService {
         try {
             StartContext context;
             try {
-                context = self.get().createManualRun(requestKey, traceId, actorId, profileId);
+                context = self.get().createManualRun(requestKey, traceId, actorId, profileId, forceQuota);
             } catch (RuntimeException exception) {
                 TopicDiscoveryRun winner = self.get().findRunByKey(requestKey);
                 if (winner != null) return runMap(winner);
@@ -322,14 +332,14 @@ public class TopicAutomationService {
     }
 
     @Transactional
-    StartContext createScheduledRun() {
+    StartContext createScheduledRun(boolean accelerated) {
         TopicAutomationSettings settings = settings();
         OffsetDateTime now = OffsetDateTime.now();
         if (!settings.enabled || (settings.nextRunAt != null && settings.nextRunAt.isAfter(now))) return null;
         String key = "scheduled-topic-" + (now.toEpochSecond() / (settings.intervalMinutes * 60L));
         TopicDiscoveryRun existing = TopicDiscoveryRun.find("idempotencyKey", key).firstResult();
         if (existing != null) {
-            settings.nextRunAt = now.plusMinutes(settings.intervalMinutes);
+            settings.nextRunAt = now.plusMinutes(quota.effectiveIntervalMinutes(settings.intervalMinutes, accelerated));
             settings.updatedAt = now;
             settings.persist();
             return null;
@@ -338,7 +348,7 @@ public class TopicAutomationService {
         String profileId = modelCatalog.resolve(null, defaultProfileId, "topic");
         StartContext context = createRun(settings, "SCHEDULED", key, "topic-schedule-" + now.toEpochSecond(), "SYSTEM", profileId);
         settings.lastRunAt = now;
-        settings.nextRunAt = now.plusMinutes(settings.intervalMinutes);
+        settings.nextRunAt = now.plusMinutes(quota.effectiveIntervalMinutes(settings.intervalMinutes, accelerated));
         settings.lastError = null;
         settings.updatedAt = now;
         settings.persist();
@@ -347,14 +357,21 @@ public class TopicAutomationService {
 
     @Transactional
     StartContext createManualRun(String key, String traceId, String actorId, String profileId) {
+        return createManualRun(key, traceId, actorId, profileId, false);
+    }
+
+    @Transactional
+    StartContext createManualRun(String key, String traceId, String actorId, String profileId, boolean forceQuota) {
         TopicDiscoveryRun existing = TopicDiscoveryRun.find("idempotencyKey", key).firstResult();
         if (existing != null) return null;
         TopicDiscoveryRun active = activeRun();
         if (active != null) return null;
         TopicAutomationSettings settings = settings();
-        return createRun(settings, "MANUAL", key,
+        StartContext context = createRun(settings, "MANUAL", key,
                 traceId == null || traceId.isBlank() ? "topic-manual-" + UUID.randomUUID() : traceId,
                 actorId == null ? "ADMIN" : actorId, profileId);
+        return context == null ? null : new StartContext(context.runId(), context.idempotencyKey(), context.traceId(),
+                context.seeds(), context.maxTopics(), context.profileId(), forceQuota);
     }
 
     @Transactional
@@ -386,7 +403,7 @@ public class TopicAutomationService {
         });
         auditLogService.log("SYSTEM", actorId, "topic.discovery.started", "topic_discovery_run",
                 String.valueOf(run.id), traceId, Map.of("trigger", trigger, "seedCount", seeds.size()));
-        return new StartContext(run.id, key, traceId, seeds, settings.maxTopicsPerRun, profileId);
+        return new StartContext(run.id, key, traceId, seeds, settings.maxTopicsPerRun, profileId, false);
     }
 
     private void launch(StartContext context) {
@@ -407,7 +424,8 @@ public class TopicAutomationService {
             if (seed.region() != null) value.put("region", seed.region());
         });
         RuntimeInferenceRequest request = new RuntimeInferenceRequest(
-                "topic", context.profileId(), input, context.idempotencyKey(), context.traceId(), promptVersion);
+                "topic", context.profileId(), input, context.idempotencyKey(), context.traceId(), promptVersion,
+                context.forceQuota());
         CompletableFuture<RuntimeInferenceResponse> future;
         try {
             future = tasks.infer(request);
@@ -797,7 +815,7 @@ public class TopicAutomationService {
     }
 
     record StartContext(Long runId, String idempotencyKey, String traceId,
-                        List<SeedSnapshot> seeds, int maxTopics, String profileId) {
+                        List<SeedSnapshot> seeds, int maxTopics, String profileId, boolean forceQuota) {
     }
 
     public record Promotion(boolean enabled, String markdown) {

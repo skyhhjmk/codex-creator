@@ -63,7 +63,19 @@ public class ArticleJobService {
     @ConfigProperty(name = "codex.creator.article.max-quality-attempts", defaultValue = "2")
     int maxQualityAttempts;
 
+    @ConfigProperty(name = "codex.creator.article.automation-enabled", defaultValue = "false")
+    boolean articleAutomationEnabled;
+
+    @ConfigProperty(name = "codex.creator.article.automation-interval-minutes", defaultValue = "360")
+    int articleAutomationIntervalMinutes;
+
+    @Inject
+    CodexQuotaService quota;
+
+    private volatile OffsetDateTime nextAutomaticRunAt;
+
     public Map<String, Object> start(JsonNode payload, String actorId, String traceId) {
+        boolean forceQuota = payload != null && payload.path("forceQuota").asBoolean(false);
         long topicId = requiredLong(payload, "topicId");
         Long categoryId = optionalLong(payload, "categoryId");
         String language = text(payload, "language", "zh-CN");
@@ -95,7 +107,7 @@ public class ArticleJobService {
                 JobContext retryContext = inTransaction(() -> retryJob(
                         existing.id, topicId, categoryId, language, instructions, actorId, traceId, profileId, reasoningEffort));
                 if (retryContext != null) {
-                    launch(retryContext);
+                    launch(retryContext, forceQuota);
                     AiArticleJob retried = inTransaction(() -> AiArticleJob.findById(retryContext.jobId()));
                     return retried == null
                             ? Map.of("status", "FAILED", "error", "article job disappeared")
@@ -130,32 +142,71 @@ public class ArticleJobService {
             }
             return jobMap(winner);
         }
-        launch(context);
+        launch(context, forceQuota);
         Long jobId = context.jobId();
         AiArticleJob job = inTransaction(() -> AiArticleJob.findById(jobId));
         return job == null ? Map.of("status", "FAILED", "error", "article job disappeared") : jobMap(job);
     }
 
+    @Scheduled(every = "1m", identity = "codex-article-automation-scheduler")
+    void scheduledAutomaticArticle() {
+        if (!articleAutomationEnabled) return;
+        OffsetDateTime now = OffsetDateTime.now();
+        if (nextAutomaticRunAt != null && nextAutomaticRunAt.isAfter(now)) return;
+        CodexQuotaService.Decision decision = quota.admission(false).join();
+        if (!decision.allowed()) return;
+        JobContext context = inTransaction(this::createAutomaticJob);
+        int interval = quota.effectiveIntervalMinutes(Math.max(60, articleAutomationIntervalMinutes), decision.accelerated());
+        nextAutomaticRunAt = now.plusMinutes(interval);
+        if (context != null) launch(context, false);
+    }
+
+    @Transactional
+    JobContext createAutomaticJob() {
+        if (AiArticleJob.count("status = ?1 or status = ?2", "QUEUED", "RUNNING") > 0) return null;
+        List<AiTopic> topics = AiTopic.<AiTopic>find("status = ?1 order by reviewedAt asc, id asc", "APPROVED")
+                .page(0, 20).list();
+        for (AiTopic topic : topics) {
+            if (AiArticleJob.count("topic.id = ?1", topic.id) > 0) continue;
+            return createJob(topic.id, null, "zh-CN", "", false, List.of(),
+                    "automatic-article-" + topic.id, "CODEX_AUTOMATION", "automatic-article-" + topic.id,
+                    defaultProfileId, "high", "REQUEST_REQUIRED", null);
+        }
+        return null;
+    }
+
     public Map<String, Object> regenerate(Long jobId, String actorId, String traceId) {
-        return regenerate(jobId, actorId, traceId, null, null);
+        return regenerate(jobId, actorId, traceId, null, null, false);
     }
 
     public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId,
                                            String requestedReasoningEffort) {
+        return regenerate(jobId, actorId, traceId, requestedProfileId, requestedReasoningEffort, false);
+    }
+
+    public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId,
+                                           String requestedReasoningEffort, boolean forceQuota) {
         return regenerate(jobId, actorId, traceId, requestedProfileId, requestedReasoningEffort,
-                "", null);
+                "", null, forceQuota);
     }
 
     public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId,
                                            String requestedReasoningEffort, String repostPolicyCode,
                                            JsonNode repostPolicy) {
+        return regenerate(jobId, actorId, traceId, requestedProfileId, requestedReasoningEffort,
+                repostPolicyCode, repostPolicy, false);
+    }
+
+    public Map<String, Object> regenerate(Long jobId, String actorId, String traceId, String requestedProfileId,
+                                           String requestedReasoningEffort, String repostPolicyCode,
+                                           JsonNode repostPolicy, boolean forceQuota) {
         String profileId = modelCatalog.resolve(requestedProfileId, defaultProfileId, "article");
         ModelProfile profile = ModelProfile.findById(profileId);
         String reasoningEffort = modelCatalog.resolveReasoningEffort(requestedReasoningEffort,
                 profile == null ? "high" : profile.reasoningEffort);
         JobContext context = inTransaction(() -> prepareRegeneration(jobId, actorId, traceId, profileId,
                 reasoningEffort, repostPolicyCode, repostPolicy));
-        launch(context);
+        launch(context, forceQuota);
         AiArticleJob job = inTransaction(() -> AiArticleJob.findById(context.jobId()));
         return job == null ? Map.of("status", "FAILED", "error", "article job disappeared") : jobMap(job);
     }
@@ -295,7 +346,7 @@ public class ArticleJobService {
                 traceId, job.generationAttempt, null, null, profileId, reasoningEffort);
     }
 
-    private void launch(JobContext context) {
+    private void launch(JobContext context, boolean forceQuota) {
         ObjectNode input = mapper.createObjectNode();
         input.put("prompt", articlePrompt(context));
         input.put("topicTitle", context.topicTitle());
@@ -313,7 +364,7 @@ public class ArticleJobService {
         }
         String taskKey = taskKey(context.jobId(), context.generationAttempt());
         RuntimeInferenceRequest request = new RuntimeInferenceRequest(
-                "article", context.profileId(), input, taskKey, context.traceId(), promptVersion);
+                "article", context.profileId(), input, taskKey, context.traceId(), promptVersion, forceQuota);
         CompletableFuture<RuntimeInferenceResponse> future;
         try {
             future = tasks.infer(request);
@@ -361,7 +412,7 @@ public class ArticleJobService {
             JsonNode report = qualityReport(exception);
             JobContext retry = inTransaction(() -> prepareQualityRetry(context.jobId(), response, report));
             if (retry != null) {
-                launch(retry);
+                launch(retry, false);
             } else {
                 inTransaction(() -> fail(context.jobId(), rootMessage(exception)));
             }
@@ -447,7 +498,7 @@ public class ArticleJobService {
             RecoveryState state = inTransaction(() -> recoveryState(jobId));
             if (state == null) continue;
             if (state.taskId() == null) {
-                launch(state.context());
+                launch(state.context(), false);
                 continue;
             }
             RuntimeInferenceResponse snapshot = tasks.snapshot(state.taskId());

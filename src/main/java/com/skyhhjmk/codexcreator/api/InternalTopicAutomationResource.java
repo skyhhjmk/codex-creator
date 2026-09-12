@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.skyhhjmk.codexcreator.security.InternalRequestVerifier;
 import com.skyhhjmk.codexcreator.service.ArticleJobService;
+import com.skyhhjmk.codexcreator.service.CodexQuotaService;
 import com.skyhhjmk.codexcreator.service.ModelCatalogService;
 import com.skyhhjmk.codexcreator.service.TopicAutomationService;
 import com.skyhhjmk.codexcreator.service.TestServerService;
@@ -36,6 +37,8 @@ public class InternalTopicAutomationResource {
 
     @Inject
     ModelCatalogService models;
+    @Inject
+    CodexQuotaService quota;
     @Inject TestServerService testServers;
 
     @POST
@@ -63,6 +66,7 @@ public class InternalTopicAutomationResource {
 
     private Response dispatch(String command, JsonNode payload, String actorId, String traceId) {
         return switch (command) {
+            case "quota.read" -> ok(quota.read().join());
             case "test-servers.list" -> ok(Map.of("items", testServers.list()));
             case "test-servers.setup-guide" -> ok(testServers.setupGuide());
             case "test-servers.create" -> ok(testServers.save(null, mapper.convertValue(payload, Map.class)));
@@ -80,7 +84,7 @@ public class InternalTopicAutomationResource {
                     "topic", models.options("topic"),
                     "article", models.options("article")));
             case "runs.start" -> ok(topics.startManual(text(payload, "idempotencyKey", ""), traceId, actorId,
-                    text(payload, "profileId", "")));
+                    text(payload, "profileId", ""), booleanValue(payload, "forceQuota")));
             case "runs.read" -> ok(topics.runView(requiredId(payload, "id")));
             case "runs.list" -> ok(topics.listRuns(integer(payload, "page", 1), integer(payload, "pageSize", 20)));
             case "topics.list" -> ok(topics.listTopics(text(payload, "status", ""),
@@ -91,7 +95,8 @@ public class InternalTopicAutomationResource {
             case "article.start" -> ok(articles.start(payload, actorId, traceId));
             case "article.regenerate" -> ok(articles.regenerate(requiredId(payload, "id"), actorId, traceId,
                     text(payload, "profileId", ""), text(payload, "reasoningEffort", ""),
-                    text(payload, "repostPolicyCode", ""), payload == null ? null : payload.get("repostPolicy")));
+                    text(payload, "repostPolicyCode", ""), payload == null ? null : payload.get("repostPolicy"),
+                    booleanValue(payload, "forceQuota")));
             case "article.read" -> ok(articles.read(requiredId(payload, "id")));
             case "article.acknowledge" -> ok(articles.acknowledgeDraft(requiredId(payload, "id"),
                     requiredId(payload, "postId"), actorId, traceId));
@@ -134,6 +139,10 @@ public class InternalTopicAutomationResource {
         if (value == null || value.isNull()) return fallback;
         if (!value.isTextual()) throw new IllegalArgumentException(field + " must be text");
         return value.asText();
+    }
+
+    private static boolean booleanValue(JsonNode payload, String field) {
+        return payload != null && payload.path(field).asBoolean(false);
     }
 
     private static String message(Exception exception) {

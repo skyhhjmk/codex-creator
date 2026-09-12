@@ -8,6 +8,7 @@ import com.skyhhjmk.codexcreator.provider.ProviderAdapter;
 import com.skyhhjmk.codexcreator.provider.ProviderRegistry;
 import com.skyhhjmk.codexcreator.provider.ProviderRequest;
 import com.skyhhjmk.codexcreator.provider.ProviderResponse;
+import com.skyhhjmk.codexcreator.provider.CodexAppServerProviderAdapter;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceRequest;
 import com.skyhhjmk.codexcreator.api.RuntimeInferenceResponse;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -15,8 +16,10 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.persistence.LockModeType;
 import jakarta.transaction.Transactional;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -56,6 +59,12 @@ public class TaskExecutionService {
 
     @Inject
     TaskCacheService taskCache;
+
+    @Inject
+    CodexQuotaService quota;
+
+    @ConfigProperty(name = "codex.creator.quota.pause-poll-interval", defaultValue = "60S")
+    Duration quotaPausePollInterval;
 
     /** In-process guard; Redis below makes recovery single-owner across instances. */
     private final Set<Long> activeTaskIds = ConcurrentHashMap.newKeySet();
@@ -120,6 +129,29 @@ public class TaskExecutionService {
             self.get().fail(context.taskId(), "PROVIDER_UNAVAILABLE", exception.getMessage());
             return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
         }
+        return admitAndExecute(context, request, adapter, cacheKey);
+    }
+
+    private CompletableFuture<RuntimeInferenceResponse> admitAndExecute(TaskContext context,
+                                                                          RuntimeInferenceRequest request,
+                                                                          ProviderAdapter adapter,
+                                                                          String cacheKey) {
+        if (!(adapter instanceof CodexAppServerProviderAdapter)) {
+            return executeAdmitted(context, request, adapter, cacheKey);
+        }
+        return quota.admission(request.bypassQuota()).thenCompose(decision -> {
+            if (!decision.allowed()) {
+                self.get().recordQuotaPause(context.taskId(), decision.status(), decision.retryAt());
+                return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
+            }
+            return executeAdmitted(context, request, adapter, cacheKey);
+        });
+    }
+
+    private CompletableFuture<RuntimeInferenceResponse> executeAdmitted(TaskContext context,
+                                                                          RuntimeInferenceRequest request,
+                                                                          ProviderAdapter adapter,
+                                                                          String cacheKey) {
         // Topic discovery and article writing must retain the app-server search
         // provenance captured for that invocation. Replaying only the cached
         // model JSON would make a fresh task look as if no web search occurred.
@@ -158,12 +190,11 @@ public class TaskExecutionService {
                 ProviderAdapter adapter = providerRegistry.resolve(claimed.profile());
                 RuntimeInferenceRequest request = new RuntimeInferenceRequest(
                         claimed.operation(), claimed.profile().profileId, claimed.input(),
-                        claimed.idempotencyKey(), claimed.traceId(), claimed.promptVersion());
+                        claimed.idempotencyKey(), claimed.traceId(), claimed.promptVersion(), false);
                 String cacheKey = CacheKey.forTask(mapper, request.operation(), request.input(),
                         request.profileId(), request.promptVersion());
-                executeWithCacheLock(new TaskContext(claimed.taskId(), claimed.profile()), request,
-                        adapter, cacheKey, Math.max(0, runtimeConfig.lockWaitSeconds() * 4),
-                        isOutputCacheable(request.operation()))
+                admitAndExecute(new TaskContext(claimed.taskId(), claimed.profile()), request,
+                        adapter, cacheKey)
                         .whenComplete((ignored, error) -> {
                             activeTaskIds.remove(claimed.taskId());
                             taskCache.release(lockKey, lock.token());
@@ -240,12 +271,12 @@ public class TaskExecutionService {
         TaskCacheService.LockAttempt lock = taskCache.acquire(cacheKey,
                 Duration.ofSeconds(Math.max(1, runtimeConfig.lockTtlSeconds())));
         if (lock.status() == TaskCacheService.LockStatus.UNAVAILABLE) {
-            // Redis is deliberately best-effort. Continue without a lock when it
-            // is down, while retaining durable PostgreSQL task state.
-            return invokeWithRetries(context, request, adapter, cacheKey, 0, cacheOutput);
+            // Cache reads may continue without Redis, but the provider slot is
+            // fail-closed so quota/concurrency guarantees are not lost.
+            return invokeWithProviderSlot(context, request, adapter, cacheKey, 0, cacheOutput);
         }
         if (lock.status() == TaskCacheService.LockStatus.ACQUIRED) {
-            return invokeWithRetries(context, request, adapter, cacheKey, 0, cacheOutput)
+            return invokeWithProviderSlot(context, request, adapter, cacheKey, 0, cacheOutput)
                     .whenComplete((ignored, error) -> taskCache.release(cacheKey, lock.token()));
         }
         if (remainingPolls <= 0) {
@@ -255,7 +286,27 @@ public class TaskExecutionService {
         }
         return delayed(Duration.ofMillis(250))
                 .thenCompose(ignored -> executeWithCacheLock(context, request, adapter, cacheKey,
-                        remainingPolls - 1, cacheOutput));
+                remainingPolls - 1, cacheOutput));
+    }
+
+    private CompletableFuture<RuntimeInferenceResponse> invokeWithProviderSlot(TaskContext context,
+                                                                                 RuntimeInferenceRequest request,
+                                                                                 ProviderAdapter adapter,
+                                                                                 String cacheKey,
+                                                                                 int attemptIndex,
+                                                                                 boolean cacheOutput) {
+        if (!(adapter instanceof CodexAppServerProviderAdapter)) {
+            return invokeWithRetries(context, request, adapter, cacheKey, attemptIndex, cacheOutput);
+        }
+        TaskCacheService.LockAttempt slot = taskCache.acquire("codex-provider-inflight", Duration.ofMinutes(30));
+        if (slot.status() != TaskCacheService.LockStatus.ACQUIRED) {
+            String code = slot.status() == TaskCacheService.LockStatus.BUSY
+                    ? "CODEX_CONCURRENCY_WAIT" : "CODEX_CONCURRENCY_UNAVAILABLE";
+            self.get().recordQuotaPause(context.taskId(), code, Instant.now().plusSeconds(60));
+            return CompletableFuture.completedFuture(self.get().snapshot(context.taskId()));
+        }
+        return invokeWithRetries(context, request, adapter, cacheKey, attemptIndex, cacheOutput)
+                .whenComplete((ignored, error) -> taskCache.release("codex-provider-inflight", slot.token()));
     }
 
     private CompletableFuture<RuntimeInferenceResponse> completeFromCache(Long taskId, JsonNode output, String cacheKey) {
@@ -442,6 +493,21 @@ public class TaskExecutionService {
             attempt.errorCode = code;
             attempt.errorMessage = task.errorMessage;
         }
+    }
+
+    @Transactional
+    void recordQuotaPause(Long taskId, String code, Instant retryAt) {
+        AutomationTask task = findById(taskId);
+        if (task == null) return;
+        OffsetDateTime now = OffsetDateTime.now();
+        Duration pollInterval = quotaPausePollInterval == null || quotaPausePollInterval.isNegative()
+                || quotaPausePollInterval.isZero() ? Duration.ofMinutes(1) : quotaPausePollInterval;
+        OffsetDateTime pollAt = now.plus(pollInterval);
+        OffsetDateTime resetAt = retryAt == null ? pollAt : OffsetDateTime.ofInstant(retryAt.plusSeconds(60), now.getOffset());
+        task.status = "RETRYING";
+        task.errorCode = code;
+        task.errorMessage = code;
+        task.nextAttemptAt = resetAt.isBefore(pollAt) ? resetAt : pollAt;
     }
 
     @Transactional
