@@ -67,7 +67,7 @@ public class TopicAutomationService {
     @ConfigProperty(name = "codex.creator.default-profile-id", defaultValue = "codex-default")
     String defaultProfileId;
 
-    @ConfigProperty(name = "codex.creator.prompt-version", defaultValue = "2")
+    @ConfigProperty(name = "codex.creator.prompt-version", defaultValue = "3")
     String promptVersion;
 
     @Scheduled(every = "1m", identity = "codex-topic-discovery-scheduler")
@@ -636,6 +636,7 @@ public class TopicAutomationService {
         if (job != null) {
             view.put("articleJobId", job.id);
             view.put("articleJobStatus", job.status);
+            view.put("postId", job.windblogPostId);
             view.put("articleError", job.errorMessage == null ? "" : job.errorMessage);
             view.put("articleNextAttemptAt", job.task == null ? null : job.task.nextAttemptAt);
             view.put("execution", job.task == null ? Map.of() : tasks.executionView(job.task.id));
@@ -715,7 +716,9 @@ public class TopicAutomationService {
         prompt.append("Propose at most ").append(maxTopics).append(" non-duplicative article topics with a specific tension, question, or decision—not a generic trend summary. ");
         prompt.append("A WRITE topic must support an original editorial angle, identify who benefits, explain why it matters now, and have enough evidence for a substantive article. Use MONITOR when evidence or timeliness is weak and IGNORE for promotional, duplicated, or low-value ideas. ");
         prompt.append("Source-quality gate: before treating a search result as evidence, inspect the page and exclude pure commercial landing pages, affiliate/deal/coupon/lead-generation pages, press-release syndication without independent reporting, SEO content farms, scraped or spun copies, AI-generated filler, and self-asked/self-answered pages whose only purpose is to funnel readers to a product or service. Do not turn such pages into topics and do not cite them. A page merely mentioning a company is not automatically disqualified: retain it only when it contributes verifiable, material facts and pair it with independent or primary evidence. ");
-        prompt.append("Each rationale must state the proposed thesis direction, reader value, strongest uncertainty or counterpoint, and why the cited sources are sufficient. Every topic needs at least two independent public sources; prefer primary sources and direct reporting. ");
+        prompt.append("Write titles in the seed's language as a natural, specific blog title: name the actual problem, change, or decision. Avoid recurring colon-plus-keywords titles, 一文读懂, 全面解析, 深度剖析, and generic opportunities/challenges/future framing. Do not merely rewrite a source headline. ");
+        prompt.append("Write each rationale as 2-3 short connected sentences: the concrete situation or verified change, what the article can help the reader do or understand, and an evidence limitation only when material. Avoid labels such as 核心论点/读者价值/反方观点 and repeated phrases such as 值得关注 or 为读者提供参考. Do not repeat the title, manufacture controversy, or claim every evergreen tutorial is newly urgent. Every topic needs at least two independent public sources; prefer primary sources and direct reporting. ");
+        prompt.append("Prefer useful gaps in existing coverage: real environment constraints, a documented failure and its cause, version-specific behavior, migration costs, or an actionable comparison. Apply these angles only when supported by sources; do not force every seed into a deployment tutorial or invent first-person experience. Within this run, merge candidates answering the same reader question even when titles, keywords, or source URLs differ. Distinct topics must offer distinct useful answers; do not fill the maximum topic count with paraphrases. ");
         prompt.append("Assign every topic to exactly one supplied seed by returning its numeric seedId. The seedId must be copied from the matching seed and must never be invented. ");
         prompt.append("Do not use shell, files, arbitrary tools, reproduce source pages, or invent facts or URLs. Return only JSON matching the schema with seedId, title, rationale, keywords, recommendation, and sources. Seeds: ");
         seeds.forEach(seed -> prompt.append('[').append(seed.id()).append(" | ").append(seed.name()).append(" | ").append(seed.query()).append(" | ")

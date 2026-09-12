@@ -158,7 +158,8 @@ public class AutomationPayloadValidator {
         if (H1.matcher(proseMarkdown).find()) {
             issues.add("正文不应重复页面标题为一级标题，请从二级标题开始");
         }
-        if (sections < 3) issues.add("正文至少需要 3 个有信息量的二级章节");
+        // Section count is a diagnostic, not a quality floor: practical posts may read
+        // better as a continuous explanation without manufactured headings.
         if (paragraphs < 5) issues.add("正文缺少充分展开的论证段落，至少需要 5 个实质段落");
         if (overlongParagraphs > 0) {
             issues.add("正文包含 " + overlongParagraphs + " 个过长段落；请拆成围绕单一观点的短段落");

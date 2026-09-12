@@ -82,6 +82,14 @@ class AutomationPayloadValidatorTest {
     }
 
     @Test
+    void acceptsContinuousArticleWithoutManufacturedSections() {
+        String markdown = goodMarkdown().replaceAll("(?m)^## (?!参考资料).+\\n", "");
+        AutomationPayloadValidator.ArticleDraft draft = validator.article(
+                goodArticle(markdown), searchProvenance(), "zh-CN");
+        assertTrue(draft.qualityReport().passed());
+    }
+
+    @Test
     void parsesFencedHighQualityArticleJson() throws Exception {
         ObjectNode article = goodArticle(goodMarkdown());
         JsonNode fenced = mapper.getNodeFactory().textNode(
