@@ -90,6 +90,9 @@ public class InternalTopicAutomationResource {
             case "topics.list" -> ok(topics.listTopics(text(payload, "status", ""),
                     integer(payload, "page", 1), integer(payload, "pageSize", 20)));
             case "topics.read" -> ok(topics.topicView(requiredId(payload, "id")));
+            case "topics.import" -> ok(topics.importTopics(payload, actorId, traceId));
+            case "topics.bindDraft" -> ok(topics.bindExternalDraft(requiredId(payload, "topicId"),
+                    payload, actorId, traceId));
             case "topics.review" -> ok(topics.reviewTopic(requiredId(payload, "id"),
                     text(payload, "decision", ""), text(payload, "note", ""), actorId, traceId));
             case "article.start" -> ok(articles.start(payload, actorId, traceId));
